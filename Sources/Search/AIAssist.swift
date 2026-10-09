@@ -112,7 +112,7 @@ final class Assistant: ObservableObject, Identifiable {
             let place = read.places[pick]
             let elsewhere = place.kind == .link && !AIPage.sameSite(place.href, page?.pageAddress)
             turns.append(Turn(question: question, answer: elsewhere ? "“\(place.text)” is on another site." : "Taking you to “\(place.text)”.", done: true))
-            if let id = turns.last?.id { take(place, index: pick, turn: id) }
+            if let id = turns.last?.id { take(place, index: pick, turn: id, named: true) }
             return
         }
         if !provider.isLocal, !Store.settings.bool(forKey: "ai.told.\(provider.rawValue)") {
@@ -180,7 +180,7 @@ final class Assistant: ObservableObject, Identifiable {
             }
         }
         if failed == nil, turn.question != nil, let pick = AIPage.chosen(in: turn.answer, count: read.places.count) {
-            take(read.places[pick], index: pick, turn: id)
+            take(read.places[pick], index: pick, turn: id, named: false)
         }
         if failed == nil, !turn.answer.isEmpty {
             messages.append(AIMessage(role: .assistant, text: turn.answer))
@@ -196,10 +196,13 @@ final class Assistant: ObservableObject, Identifiable {
         task = nil
     }
 
-    /// The place the model picked: a section of the page scrolled to and
-    /// outlined; a page of the same site opened in this tab; a page of
-    /// another site offered as a button.
-    private func take(_ place: AIPage.Place, index: Int, turn id: UUID) {
+    /// The place picked: a section of the page scrolled to and outlined; a
+    /// page of the same site opened in this tab when the person named it.
+    /// Any other link — the model's pick, or another site — is offered as a
+    /// button: the model reads the website's text, and a page that talks it
+    /// into a pick (a sign-out, a "confirm" link) gets only a button the
+    /// person has to press.
+    private func take(_ place: AIPage.Place, index: Int, turn id: UUID, named: Bool) {
         guard let page, let at = turns.firstIndex(where: { $0.id == id }) else { return }
         switch place.kind {
         case .section:
@@ -211,7 +214,7 @@ final class Assistant: ObservableObject, Identifiable {
             }
         case .link:
             guard let href = place.href else { return }
-            if AIPage.sameSite(href, page.pageAddress) {
+            if named, AIPage.sameSite(href, page.pageAddress) {
                 page.go(to: href)
                 turns[at].went = "Opened “\(place.text)”"
             } else {
@@ -220,7 +223,7 @@ final class Assistant: ObservableObject, Identifiable {
         }
     }
 
-    /// The offered page on another site, opened because the person said so.
+    /// The offered page, opened because the person said so.
     func follow(_ place: AIPage.Place) {
         guard let page, let href = place.href, let at = turns.firstIndex(where: { $0.offer == place }) else { return }
         page.go(to: href)
@@ -461,7 +464,7 @@ struct AssistantPanel: View {
                     .foregroundStyle(Palette.muted)
                 }
                 if let offer = turn.offer, let host = offer.href?.host() {
-                    Pill("Go to \(host)", filled: true) { follow(offer) }
+                    Pill("Open “\(String(offer.text.prefix(40)))” · \(host)", filled: true) { follow(offer) }
                         .help(offer.href?.absoluteString ?? "")
                 }
                 if !turn.strays.isEmpty {

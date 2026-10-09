@@ -5,7 +5,7 @@ Office Commun's [Search](https://github.com/driceroland/Search), with a few chan
 ## What's different
 
 - **AI is on.** View › Ask About This Page… (⌘E). Pick a provider in Settings › AI. Keys go in the login keychain, because this build isn't signed with Office Commun's provisioning profile.
-- **"Take me to…"** Ask the AI panel "take me to pricing" or "open the careers page". If you name a heading or link that's on the page, Search goes there itself and nothing is sent to the model. For vaguer requests ("where do I see what it costs?"), the model picks from the page's numbered headings and links. Sections are scrolled to, and pages on the same site open in the tab. Pages on another site only appear as a button you have to click.
+- **"Take me to…"** Ask the AI panel "take me to pricing" or "open the careers page". If you name a heading or link that's on the page, Search goes there itself and nothing is sent to the model. For vaguer requests ("where do I see what it costs?"), the model picks from the page's numbered headings and links. Sections are scrolled to. A link you named opens in the tab if it's on the same site. A link the model picked, or one on another site, shows as a button you click, so a page can't talk the AI into opening something.
 - **Bookmarks under the pins,** like Arc or Dia. Each space shows the top-level bookmarks folder with the same name as the space. To pick a different folder, right-click the space icon › Bookmarks in Sidebar.
 - **No Office Commun updates.** Their builds are signed by another team and would be refused anyway. Update from upstream instead (below).
 

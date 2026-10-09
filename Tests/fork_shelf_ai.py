@@ -51,7 +51,8 @@ class Model(BaseHTTPRequestHandler):
     """Chat completions, streamed, as Ollama answers them. Asked where
     something is, it reads the question for what it means — costs is
     pricing, jobs are roles — and picks from the numbered places."""
-    MEANS = {"costs": "pricing", "cost": "pricing", "price": "pricing", "jobs": "roles", "hiring": "roles"}
+    MEANS = {"costs": "pricing", "cost": "pricing", "price": "pricing", "jobs": "roles", "hiring": "roles",
+             "work": "careers"}
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -171,6 +172,12 @@ try:
 
     turn = ask(home, "what is this page about")
     t.ok("plain question: answered, nowhere to go", turn.get("went") == "" and turn.get("offer") == "", turn)
+
+    sent = len(asked)
+    turn = ask(home, "where could I work here?")
+    t.ok("model's link pick: the model is asked", len(asked) == sent + 1, len(asked) - sent)
+    t.ok("model's link pick: offered as a button, not opened", url(home) == f"{SITE}/" and turn.get("offer", "").endswith("/careers")
+         and turn.get("went") == "", (url(home), turn))
 
     turn = ask(home, "open the careers page")
     t.ok("careers: the same site's page opens in this tab", url(home) == f"{SITE}/careers", url(home))
