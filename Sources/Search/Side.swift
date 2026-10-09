@@ -25,9 +25,12 @@ struct SideBar: View {
     @Namespace private var after
 
     @State private var groupFrames: [UUID: CGRect] = [:]
+    /// Watched so the drag area below the rows moves with the shelf.
+    @ObservedObject private var shelf = Shelf.shared
+    @ObservedObject private var bookmarks = Shared.bookmarks
 
-    private static let row: CGFloat = 28
-    private static let gap: CGFloat = 2
+    static let row: CGFloat = 28
+    static let gap: CGFloat = 2
     private static let square: CGFloat = 34
     private static let pinGap: CGFloat = 4
 
@@ -298,7 +301,8 @@ struct SideBar: View {
         let pairs = rows.filter { browser.split(for: $0) != nil }.count
         let headings = prefs.usesTabGroups ? CGFloat(browser.tabGroups.count) * (GroupHeading.height + SideBar.gap) : 0
         let loose = CGFloat(rows.count) * (SideBar.row + SideBar.gap) + CGFloat(pairs) * SideBar.row + headings
-        return Metrics.strip + pinBlock + listBlock + loose + SideBar.row + 8
+        let shelf = Shelf.height(lines: Shelf.shared.lines(Shelf.folder(for: browser.space, in: browser.bookmarks.roots)).count)
+        return Metrics.strip + pinBlock + listBlock + shelf + loose + SideBar.row + 8
     }
 
     @ViewBuilder
@@ -503,6 +507,8 @@ struct SideBar: View {
     private var rows: some View {
         VStack(alignment: .leading, spacing: 0) {
             listed
+            // The space's bookmarks, under its pins (Connor's fork, see Shelf).
+            ShelfView(browser: browser, bookmarks: browser.bookmarks)
             loose
             newTab
         }

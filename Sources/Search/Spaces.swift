@@ -30,6 +30,10 @@ struct Space: Codable, Identifiable, Equatable {
     var sharesSignIns: Bool?
     /// Where this space's downloads go; nil for the folder in Settings.
     var downloads: String?
+    /// The bookmarks folder shown under its pins (see Shelf): a top-level
+    /// folder's id, "none" for none, or nil for the folder named as the
+    /// space is.
+    var shelf: String?
 
     /// The first space: the session and the store there were before spaces.
     static let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000001") ?? UUID()
@@ -299,6 +303,12 @@ extension Browser {
         Spaces.write(spaces)
     }
 
+    func setSpaceShelf(_ id: UUID, to folder: String?) {
+        guard let at = spaces.firstIndex(where: { $0.id == id }) else { return }
+        spaces[at].shelf = folder
+        Spaces.write(spaces)
+    }
+
     func setSpaceDownloads(_ id: UUID, to folder: URL?) {
         guard let at = spaces.firstIndex(where: { $0.id == id }) else { return }
         spaces[at].downloads = folder?.path
@@ -477,6 +487,18 @@ enum SpaceMenu {
             if at > 0 { menu.addItem(item("Move Left") { browser.moveSpace(here.id, to: at - 1) }) }
             if at < browser.spaces.count - 1 { menu.addItem(item("Move Right") { browser.moveSpace(here.id, to: at + 1) }) }
         }
+        // Which bookmarks folder sits under the pins (see Shelf).
+        let shown = Shelf.folder(for: here, in: browser.bookmarks.roots)
+        let shelves = NSMenu()
+        shelves.addItem(item("None", checked: shown == nil) { browser.setSpaceShelf(here.id, to: "none") })
+        let folders = browser.bookmarks.roots.filter(\.isFolder)
+        if !folders.isEmpty { shelves.addItem(.separator()) }
+        for each in folders {
+            shelves.addItem(item(each.title, checked: shown?.id == each.id) { browser.setSpaceShelf(here.id, to: each.id.uuidString) })
+        }
+        let shelf = NSMenuItem(title: "Bookmarks in Sidebar", action: nil, keyEquivalent: "")
+        shelf.submenu = shelves
+        menu.addItem(shelf)
         let folder = here.downloads.map { URL(fileURLWithPath: $0).lastPathComponent }
         menu.addItem(item(folder.map { "Downloads to “\($0)”…" } ?? "Downloads Folder…") {
             Ask.folder { browser.setSpaceDownloads(here.id, to: $0) }

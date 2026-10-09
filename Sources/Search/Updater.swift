@@ -167,6 +167,10 @@ final class Updater: ObservableObject {
         default: break
         }
         guard !checking else { return }
+        guard Updater.fromFeed else {
+            say?("This is your own build of Search — it updates from your fork, not Office Commun's")
+            return
+        }
         say?("Checking for updates…")
         check { [weak self] found in
             guard let self else { return }
@@ -300,7 +304,14 @@ final class Updater: ObservableObject {
         return arguments + [Bundle.main.bundleURL.path]
     }
 
+    /// Connor's fork never reads Office Commun's feed: its builds are signed
+    /// by another team, and would only be downloaded to be refused. It is
+    /// brought up to date from the fork instead (git merge upstream/main,
+    /// then ./build.sh).
+    static let fromFeed = false
+
     private static func fetch() async -> Release? {
+        guard fromFeed || Store.testing else { return nil }
         // The feed as Office Commun signed it: appcast.json.zip, next to the
         // plain one older builds read, holding the same file with its code
         // signature (build.sh). Only what comes out of it, checked, is read:

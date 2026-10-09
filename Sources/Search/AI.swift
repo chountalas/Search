@@ -16,7 +16,8 @@ import Security
 /// a setting left on by a test build reads as off. The code stays; this is
 /// the one line that brings it back.
 enum AI {
-    static let shipped = false
+    /// On in Connor's fork: the add-on is the reason for it.
+    static let shipped = true
 }
 
 /// Where the answers come from.
@@ -116,20 +117,25 @@ enum AIKeys {
 
     private static func account(_ provider: AIProvider) -> String { "\(provider.rawValue)@\(provider.host)" }
 
-    private static func query(_ provider: AIProvider) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecUseDataProtectionKeychain as String: true,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: account(provider)]
+    /// Both keychains, the data protection one first. It wants an
+    /// application identifier that only a build with Office Commun's
+    /// provisioning profile has; Connor's fork is signed with his own
+    /// Developer ID and no profile, so it is refused there and keeps its keys
+    /// in the login keychain instead, as items only an app with this
+    /// signature reads without asking.
+    private static let keychains = [true, false]
+
+    private static func query(_ provider: AIProvider, modern: Bool) -> [String: Any] {
+        var asked: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account(provider)]
+        if modern { asked[kSecUseDataProtectionKeychain as String] = true }
+        return asked
     }
 
-    /// Whether a key can be kept at all by this copy of Search.
-    static var available: Bool {
-        if Store.testing { return true }
-        var asked = query(.anthropic)
-        asked[kSecReturnAttributes as String] = true
-        return SecItemCopyMatching(asked as CFDictionary, nil) != errSecMissingEntitlement
-    }
+    /// Whether a key can be kept at all by this copy of Search: always, in
+    /// one keychain or the other.
+    static var available: Bool { true }
 
     static func save(_ key: String, for provider: AIProvider) -> Saved {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -138,15 +144,20 @@ enum AIKeys {
             rehearsal[account(provider)] = key
             return .kept
         }
-        SecItemDelete(query(provider) as CFDictionary)
-        var item = query(provider)
-        item[kSecValueData as String] = Data(key.utf8)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        item[kSecAttrSynchronizable as String] = false
-        item[kSecAttrLabel as String] = "Search — \(provider.name) key"
-        // The last four, to tell keys apart in Settings without reading one.
-        item[kSecAttrComment as String] = String(key.suffix(4))
-        switch SecItemAdd(item as CFDictionary, nil) {
+        for modern in keychains { SecItemDelete(query(provider, modern: modern) as CFDictionary) }
+        func add(modern: Bool) -> OSStatus {
+            var item = query(provider, modern: modern)
+            item[kSecValueData as String] = Data(key.utf8)
+            if modern { item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly }
+            item[kSecAttrSynchronizable as String] = false
+            item[kSecAttrLabel as String] = "Search — \(provider.name) key"
+            // The last four, to tell keys apart in Settings without reading one.
+            item[kSecAttrComment as String] = String(key.suffix(4))
+            return SecItemAdd(item as CFDictionary, nil)
+        }
+        var status = add(modern: true)
+        if status == errSecMissingEntitlement { status = add(modern: false) }
+        switch status {
         case errSecSuccess: return .kept
         case errSecMissingEntitlement: return .unavailable
         default: return .failed
@@ -156,29 +167,35 @@ enum AIKeys {
     /// The key, for the request about to go out. Nil when there is none.
     static func key(for provider: AIProvider) -> String? {
         if Store.testing { return rehearsal[account(provider)] }
-        var asked = query(provider)
-        asked[kSecReturnData as String] = true
-        asked[kSecMatchLimit as String] = kSecMatchLimitOne
-        var found: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess, let data = found as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        for modern in keychains {
+            var asked = query(provider, modern: modern)
+            asked[kSecReturnData as String] = true
+            asked[kSecMatchLimit as String] = kSecMatchLimitOne
+            var found: CFTypeRef?
+            if SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess, let data = found as? Data {
+                return String(data: data, encoding: .utf8)
+            }
+        }
+        return nil
     }
 
     /// "••••1a2b" for one that is kept, without reading the key itself.
     static func hint(for provider: AIProvider) -> String? {
         if Store.testing { return rehearsal[account(provider)].map { "••••" + $0.suffix(4) } }
-        var asked = query(provider)
-        asked[kSecReturnAttributes as String] = true
-        var found: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess,
-              let attributes = found as? [String: Any]
-        else { return nil }
-        return "••••" + (attributes[kSecAttrComment as String] as? String ?? "")
+        for modern in keychains {
+            var asked = query(provider, modern: modern)
+            asked[kSecReturnAttributes as String] = true
+            var found: CFTypeRef?
+            if SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess, let attributes = found as? [String: Any] {
+                return "••••" + (attributes[kSecAttrComment as String] as? String ?? "")
+            }
+        }
+        return nil
     }
 
     static func forget(_ provider: AIProvider) {
         if Store.testing { rehearsal[account(provider)] = nil; return }
-        SecItemDelete(query(provider) as CFDictionary)
+        for modern in keychains { SecItemDelete(query(provider, modern: modern) as CFDictionary) }
     }
 
     static func forgetAll() {

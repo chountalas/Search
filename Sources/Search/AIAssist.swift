@@ -24,6 +24,11 @@ final class Assistant: ObservableObject, Identifiable {
         var failed: String?
         /// Addresses, emails and numbers in the answer the page doesn't have.
         var strays: [String] = []
+        /// Where it took the person (Connor's fork), said under the answer.
+        var went: String?
+        /// A page on another site it would take them to: a button, never a
+        /// jump, since the page's words may have steered the pick.
+        var offer: AIPage.Place?
     }
 
     let id = UUID()
@@ -47,9 +52,12 @@ final class Assistant: ObservableObject, Identifiable {
     private var messages: [AIMessage] = []
     private var waiting: AIPage.Ask?
     private var task: Task<Void, Never>?
+    /// The tab, to take the person somewhere on it.
+    private weak var page: Tab?
 
     init(tab: Tab, provider: AIProvider, model: String, summary: Bool) {
         self.tab = tab.id
+        self.page = tab
         self.provider = provider
         self.model = model
         self.summary = summary
@@ -78,10 +86,35 @@ final class Assistant: ObservableObject, Identifiable {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !busy, notice == nil, read != nil else { return }
         draft = ""
-        ask(.question(String(question.prefix(2000))))
+        let asked = String(question.prefix(2000))
+        // Taken to another page since it was read: that page is read now, and
+        // the conversation starts again from it.
+        if let page, let read, !Shelf.same(page.pageAddress, read.url) {
+            reading = true
+            Task { @MainActor [weak self, weak page] in
+                guard let self, let page else { return }
+                if let fresh = await AIPage.read(page) {
+                    self.read = fresh
+                    self.addressed = fresh.addressed
+                    self.messages = []
+                }
+                self.reading = false
+                self.ask(.question(asked))
+            }
+            return
+        }
+        ask(.question(asked))
     }
 
     private func ask(_ ask: AIPage.Ask) {
+        // A place named outright is gone to at once, and nothing is sent.
+        if case .question(let question) = ask, let read, let pick = AIPage.direct(question, places: read.places) {
+            let place = read.places[pick]
+            let elsewhere = place.kind == .link && !AIPage.sameSite(place.href, page?.pageAddress)
+            turns.append(Turn(question: question, answer: elsewhere ? "“\(place.text)” is on another site." : "Taking you to “\(place.text)”.", done: true))
+            if let id = turns.last?.id { take(place, index: pick, turn: id) }
+            return
+        }
         if !provider.isLocal, !Store.settings.bool(forKey: "ai.told.\(provider.rawValue)") {
             waiting = ask
             notice = AIAssist.notice(for: provider)
@@ -105,7 +138,7 @@ final class Assistant: ObservableObject, Identifiable {
             messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence))]
             turns.append(Turn(question: nil))
         case .question(let question):
-            messages.append(AIMessage(role: .user, text: messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : question))
+            messages.append(AIMessage(role: .user, text: messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : AIPage.followUp(question, read)))
             turns.append(Turn(question: question))
         }
         // The key, read now and let go with the request.
@@ -146,6 +179,9 @@ final class Assistant: ObservableObject, Identifiable {
                 self.turns[index].strays = strays
             }
         }
+        if failed == nil, turn.question != nil, let pick = AIPage.chosen(in: turn.answer, count: read.places.count) {
+            take(read.places[pick], index: pick, turn: id)
+        }
         if failed == nil, !turn.answer.isEmpty {
             messages.append(AIMessage(role: .assistant, text: turn.answer))
         } else if !messages.isEmpty {
@@ -158,6 +194,38 @@ final class Assistant: ObservableObject, Identifiable {
     func stop() {
         task?.cancel()
         task = nil
+    }
+
+    /// The place the model picked: a section of the page scrolled to and
+    /// outlined; a page of the same site opened in this tab; a page of
+    /// another site offered as a button.
+    private func take(_ place: AIPage.Place, index: Int, turn id: UUID) {
+        guard let page, let at = turns.firstIndex(where: { $0.id == id }) else { return }
+        switch place.kind {
+        case .section:
+            Task { @MainActor [weak self, weak page] in
+                guard let page else { return }
+                let found = await AIPage.reveal(index, text: place.text, in: page)
+                guard let self, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
+                self.turns[at].went = found ? "Scrolled to “\(place.text)”" : "“\(place.text)” isn't on the page any more"
+            }
+        case .link:
+            guard let href = place.href else { return }
+            if AIPage.sameSite(href, page.pageAddress) {
+                page.go(to: href)
+                turns[at].went = "Opened “\(place.text)”"
+            } else {
+                turns[at].offer = place
+            }
+        }
+    }
+
+    /// The offered page on another site, opened because the person said so.
+    func follow(_ place: AIPage.Place) {
+        guard let page, let href = place.href, let at = turns.firstIndex(where: { $0.offer == place }) else { return }
+        page.go(to: href)
+        turns[at].offer = nil
+        turns[at].went = "Opened “\(place.text)”"
     }
 }
 
@@ -310,7 +378,7 @@ struct AssistantPanel: View {
                 caution("This page has text written for an AI to follow. The answer may have been steered by it.")
             }
             ForEach(assistant.turns) { turn in
-                TurnView(turn: turn).id(turn.id)
+                TurnView(turn: turn, follow: assistant.follow).id(turn.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -360,6 +428,7 @@ struct AssistantPanel: View {
 
     private struct TurnView: View {
         let turn: Assistant.Turn
+        var follow: (AIPage.Place) -> Void = { _ in }
 
         var body: some View {
             VStack(alignment: .leading, spacing: 6) {
@@ -373,8 +442,8 @@ struct AssistantPanel: View {
                 }
                 // As written, and never as markdown: no link to follow, no
                 // picture to fetch.
-                if !turn.answer.isEmpty {
-                    Text(verbatim: turn.answer)
+                if !AIPage.shown(turn.answer).isEmpty {
+                    Text(verbatim: AIPage.shown(turn.answer))
                         .font(.system(size: 13))
                         .foregroundStyle(Palette.ink)
                         .lineSpacing(2.5)
@@ -383,6 +452,17 @@ struct AssistantPanel: View {
                 }
                 if let failed = turn.failed {
                     Text(verbatim: failed).font(.system(size: 12)).foregroundStyle(Palette.muted)
+                }
+                if let went = turn.went {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.turn.down.right").font(.system(size: 9.5, weight: .medium))
+                        Text(verbatim: went).font(.system(size: 11.5)).lineLimit(2)
+                    }
+                    .foregroundStyle(Palette.muted)
+                }
+                if let offer = turn.offer, let host = offer.href?.host() {
+                    Pill("Go to \(host)", filled: true) { follow(offer) }
+                        .help(offer.href?.absoluteString ?? "")
                 }
                 if !turn.strays.isEmpty {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {

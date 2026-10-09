@@ -387,6 +387,24 @@ final class Bench {
                 }
             }
 
+        case "shelf":
+            // Connor's fork: the bookmarks under the pins (Shelf) as drawn,
+            // and — given a title — that row pressed: a folder opened or
+            // closed, a bookmark gone to.
+            let folder = Shelf.folder(for: browser.space, in: browser.bookmarks.roots)
+            if let title = request["title"] as? String {
+                guard let line = Shelf.shared.lines(folder).first(where: { $0.node.title == title }) else {
+                    answer(["error": "no row \(title)"]); return
+                }
+                if line.node.isFolder {
+                    Shelf.shared.toggle(line.id)
+                } else if let url = line.node.url.flatMap(URL.init(string:)) {
+                    browser.goToShelf(url)
+                }
+            }
+            answer(["space": browser.space.name, "folder": folder?.title ?? "",
+                    "lines": Shelf.shared.lines(folder).map { ["title": $0.node.title, "depth": $0.depth, "folder": $0.node.isFolder] as [String: Any] },
+                    "active": browser.active?.pageAddress?.absoluteString ?? "", "tabs": browser.tabs.count])
         case "eval":
             guard let tab = find(request, in: browser) else { answer(missing(request)); return }
             guard let js = request["js"] as? String else { answer(["error": "eval needs js"]); return }
@@ -1440,7 +1458,9 @@ final class Bench {
                     "addressed": assistant.addressed,
                     "place": assistant.place,
                     "turns": assistant.turns.map { ["question": $0.question ?? "", "answer": $0.answer, "done": $0.done,
-                                                     "failed": $0.failed ?? "", "strays": $0.strays] as [String: Any] },
+                                                     "failed": $0.failed ?? "", "strays": $0.strays,
+                                                     "shown": AIPage.shown($0.answer), "went": $0.went ?? "",
+                                                     "offer": $0.offer?.href?.absoluteString ?? ""] as [String: Any] },
                 ])
             case "picture":
                 // The panel as it stands, and Settings › AI, drawn off screen
@@ -1464,7 +1484,8 @@ final class Bench {
                 Task { @MainActor in
                     guard let read = await AIPage.read(tab) else { answer(["error": "nothing to read"]); return }
                     Bench.aiRead = read
-                    answer(["title": read.title, "text": read.text, "links": read.links.count, "cut": read.cut])
+                    answer(["title": read.title, "text": read.text, "links": read.links.count, "cut": read.cut,
+                            "places": read.places.map { [$0.kind.rawValue, $0.text, $0.href?.absoluteString ?? ""] }])
                 }
             case "check":
                 // The last page read, and an answer checked against it.
