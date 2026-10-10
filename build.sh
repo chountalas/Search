@@ -54,6 +54,9 @@ case "$ARCH" in
 esac
 APP="$OUT/Search.app"
 NAME="Search"
+# What the Dock, the menu bar and Spotlight call it (Connor's fork). The
+# executable and the data folders keep the name Search, so nothing moves.
+SHOWN="Connor's Search"
 VERSION="$(tr -d '[:space:]' < VERSION)"
 # A build number that only ever goes up, so the updater can tell newer from
 # older without parsing version strings.
@@ -131,8 +134,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>$NAME</string>
-  <key>CFBundleDisplayName</key><string>$NAME</string>
+  <key>CFBundleName</key><string>$SHOWN</string>
+  <key>CFBundleDisplayName</key><string>$SHOWN</string>
   <key>CFBundleExecutable</key><string>$NAME</string>
   <key>CFBundleIdentifier</key><string>com.officecommun.search</string>
   <key>CFBundlePackageType</key><string>APPL</string>

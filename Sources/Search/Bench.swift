@@ -1451,6 +1451,14 @@ final class Bench {
             case "agree":
                 browser.assisting?.agree()
                 answer(["open": browser.assisting != nil])
+            case "allow", "deny", "stop":
+                // The step waiting for a go-ahead, allowed or not; or Stop.
+                switch request["action"] as? String {
+                case "allow": browser.assisting?.allow()
+                case "deny": browser.assisting?.deny()
+                default: browser.assisting?.stop()
+                }
+                answer(["open": browser.assisting != nil])
             case "state":
                 guard let assistant = browser.assisting else { answer(["open": false]); return }
                 answer([
@@ -1460,7 +1468,9 @@ final class Bench {
                     "turns": assistant.turns.map { ["question": $0.question ?? "", "answer": $0.answer, "done": $0.done,
                                                      "failed": $0.failed ?? "", "strays": $0.strays,
                                                      "shown": AIPage.shown($0.answer), "went": $0.went ?? "",
-                                                     "offer": $0.offer?.href?.absoluteString ?? ""] as [String: Any] },
+                                                     "steps": $0.steps, "acting": $0.acting,
+                                                     "waiting": $0.waiting?.what ?? "", "why": $0.waiting?.why ?? "",
+                                                     "waitingURL": ($0.waiting?.place?.href ?? $0.waiting?.action.url)?.absoluteString ?? ""] as [String: Any] },
                 ])
             case "picture":
                 // The panel as it stands, and Settings › AI, drawn off screen
@@ -1485,7 +1495,7 @@ final class Bench {
                     guard let read = await AIPage.read(tab) else { answer(["error": "nothing to read"]); return }
                     Bench.aiRead = read
                     answer(["title": read.title, "text": read.text, "links": read.links.count, "cut": read.cut,
-                            "places": read.places.map { [$0.kind.rawValue, $0.text, $0.href?.absoluteString ?? ""] }])
+                            "places": read.places.map { [$0.kind.rawValue, $0.text, $0.href?.absoluteString ?? "", $0.detail, $0.form] }])
                 }
             case "check":
                 // The last page read, and an answer checked against it.

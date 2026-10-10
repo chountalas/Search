@@ -24,11 +24,16 @@ final class Assistant: ObservableObject, Identifiable {
         var failed: String?
         /// Addresses, emails and numbers in the answer the page doesn't have.
         var strays: [String] = []
-        /// Where it took the person (Connor's fork), said under the answer.
-        var went: String?
-        /// A page on another site it would take them to: a button, never a
-        /// jump, since the page's words may have steered the pick.
-        var offer: AIPage.Place?
+        /// What the AI did on the page for this request (Connor's fork,
+        /// AIAct), in order, listed under the answer.
+        var steps: [String] = []
+        /// Still at work on the page: a step, the page settling after it, or
+        /// the person's go-ahead.
+        var acting = false
+        /// A step held for the person's go-ahead, shown with Allow and Stop.
+        var waiting: AIAct.Pending?
+
+        var went: String? { steps.last }
     }
 
     let id = UUID()
@@ -54,6 +59,11 @@ final class Assistant: ObservableObject, Identifiable {
     private var task: Task<Void, Never>?
     /// The tab, to take the person somewhere on it.
     private weak var page: Tab?
+    /// Bumped by Stop: a step or an answer still under way is let go.
+    private var generation = 0
+    /// The last message with the page in it, and what it is cut down to
+    /// when the next one comes: only the page as it is now goes whole.
+    private var lastPage: (index: Int, short: String)?
 
     init(tab: Tab, provider: AIProvider, model: String, summary: Bool) {
         self.tab = tab.id
@@ -74,7 +84,10 @@ final class Assistant: ObservableObject, Identifiable {
         }
     }
 
-    var busy: Bool { reading || turns.last.map { !$0.done } ?? false }
+    var busy: Bool { reading || turns.last.map { !$0.done || $0.acting } ?? false }
+
+    /// An answer coming, or a step under way: what Stop stops.
+    var working: Bool { turns.last.map { !$0.done || ($0.acting && $0.waiting == nil) } ?? false }
 
     /// Where it ran, for the foot of every answer.
     var place: String {
@@ -87,23 +100,24 @@ final class Assistant: ObservableObject, Identifiable {
         guard !question.isEmpty, !busy, notice == nil, read != nil else { return }
         draft = ""
         let asked = String(question.prefix(2000))
-        // Taken to another page since it was read: that page is read now, and
-        // the conversation starts again from it.
-        if let page, let read, !Shelf.same(page.pageAddress, read.url) {
-            reading = true
-            Task { @MainActor [weak self, weak page] in
-                guard let self, let page else { return }
-                if let fresh = await AIPage.read(page) {
-                    self.read = fresh
-                    self.addressed = fresh.addressed
+        guard let page else { ask(.question(asked)); return }
+        // The page read again for every request (Connor's fork): it may have
+        // changed since, and what the AI acts on is numbered afresh. Taken
+        // to another page, the conversation starts again from it.
+        reading = true
+        Task { @MainActor [weak self, weak page] in
+            guard let self, let page else { return }
+            if let fresh = await AIPage.read(page) {
+                if !Shelf.same(fresh.url, self.read?.url) {
                     self.messages = []
+                    self.lastPage = nil
                 }
-                self.reading = false
-                self.ask(.question(asked))
+                self.read = fresh
+                self.addressed = fresh.addressed
             }
-            return
+            self.reading = false
+            self.ask(.question(asked))
         }
-        ask(.question(asked))
     }
 
     private func ask(_ ask: AIPage.Ask) {
@@ -112,7 +126,7 @@ final class Assistant: ObservableObject, Identifiable {
             let place = read.places[pick]
             let elsewhere = place.kind == .link && !AIPage.sameSite(place.href, page?.pageAddress)
             turns.append(Turn(question: question, answer: elsewhere ? "“\(place.text)” is on another site." : "Taking you to “\(place.text)”.", done: true))
-            if let id = turns.last?.id { take(place, index: pick, turn: id, named: true) }
+            if let id = turns.last?.id { act(AIAct.Action(verb: .go, index: pick), turn: id, named: true) }
             return
         }
         if !provider.isLocal, !Store.settings.bool(forKey: "ai.told.\(provider.rawValue)") {
@@ -135,17 +149,34 @@ final class Assistant: ObservableObject, Identifiable {
         guard let read else { return }
         switch ask {
         case .summary:
-            messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence))]
+            messages = []
+            lastPage = nil
+            withPage(AIPage.opening(read, .summary, fence: fence), short: "(The page as it was then is left out.) I asked for a summary.")
             turns.append(Turn(question: nil))
         case .question(let question):
-            messages.append(AIMessage(role: .user, text: messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : AIPage.followUp(question, read)))
+            withPage(AIPage.opening(read, ask, fence: fence), short: "(The page as it was then is left out.) I asked: \(question)")
             turns.append(Turn(question: question))
         }
+        run()
+    }
+
+    /// A message with the page in it; the one before is cut down to `short`.
+    private func withPage(_ text: String, short: String) {
+        if let last = lastPage, last.index < messages.count, messages[last.index].role == .user {
+            messages[last.index] = AIMessage(role: .user, text: last.short)
+        }
+        lastPage = (messages.count, short)
+        messages.append(AIMessage(role: .user, text: text))
+    }
+
+    /// The model asked, its answer streamed into the last turn.
+    private func run() {
         // The key, read now and let go with the request.
         let key = provider.isLocal ? nil : AIKeys.key(for: provider)
         let stream = provider == .thisMac
             ? AIEngine.shared.stream(system: AIPage.system(fence: fence), messages: messages)
             : AIClient.shared.stream(provider, model: model, system: AIPage.system(fence: fence), messages: messages, key: key)
+        let generation = self.generation
         task = Task { @MainActor [weak self] in
             do {
                 for try await piece in stream {
@@ -155,20 +186,22 @@ final class Assistant: ObservableObject, Identifiable {
                     // talked into writing on and on is stopped.
                     if self.turns[self.turns.count - 1].answer.count > Assistant.longest { break }
                 }
-                self?.finish(nil)
+                self?.finish(nil, generation: generation)
             } catch {
-                self?.finish(error.localizedDescription)
+                self?.finish(error.localizedDescription, generation: generation)
             }
         }
     }
 
     static let longest = 16_000
 
-    private func finish(_ failed: String?) {
+    private func finish(_ failed: String?, generation: Int) {
         guard !turns.isEmpty, let read else { return }
+        // Stopped: what came is kept as it is, without an error for it.
+        let stopped = generation != self.generation
         var turn = turns[turns.count - 1]
         turn.done = true
-        turn.failed = failed
+        turn.failed = stopped ? nil : failed
         turns[turns.count - 1] = turn
         // Checked away from the window's thread: a long answer is a long look.
         let id = turn.id, answer = turn.answer
@@ -179,56 +212,104 @@ final class Assistant: ObservableObject, Identifiable {
                 self.turns[index].strays = strays
             }
         }
-        if failed == nil, turn.question != nil, let pick = AIPage.chosen(in: turn.answer, count: read.places.count) {
-            take(read.places[pick], index: pick, turn: id, named: false)
-        }
-        if failed == nil, !turn.answer.isEmpty {
+        if failed == nil, !stopped, !turn.answer.isEmpty {
             messages.append(AIMessage(role: .assistant, text: turn.answer))
-        } else if !messages.isEmpty {
+        } else if messages.last?.role == .user {
             // A question that got no answer isn't part of what follows; the
             // page goes again with the next one if it was the first.
             messages.removeLast()
+        }
+        if failed == nil, !stopped, turn.question != nil,
+           let action = AIAct.parse(turn.answer, count: read.places.count) {
+            act(action, turn: id, named: false)
+        } else {
+            turns[turns.count - 1].acting = false
         }
     }
 
     func stop() {
         task?.cancel()
         task = nil
-    }
-
-    /// The place picked: a section of the page scrolled to and outlined; a
-    /// page of the same site opened in this tab when the person named it.
-    /// Any other link — the model's pick, or another site — is offered as a
-    /// button: the model reads the website's text, and a page that talks it
-    /// into a pick (a sign-out, a "confirm" link) gets only a button the
-    /// person has to press.
-    private func take(_ place: AIPage.Place, index: Int, turn id: UUID, named: Bool) {
-        guard let page, let at = turns.firstIndex(where: { $0.id == id }) else { return }
-        switch place.kind {
-        case .section:
-            Task { @MainActor [weak self, weak page] in
-                guard let page else { return }
-                let found = await AIPage.reveal(index, text: place.text, in: page)
-                guard let self, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
-                self.turns[at].went = found ? "Scrolled to “\(place.text)”" : "“\(place.text)” isn't on the page any more"
-            }
-        case .link:
-            guard let href = place.href else { return }
-            if named, AIPage.sameSite(href, page.pageAddress) {
-                page.go(to: href)
-                turns[at].went = "Opened “\(place.text)”"
-            } else {
-                turns[at].offer = place
-            }
+        generation += 1
+        if let at = turns.indices.last, turns[at].acting || !turns[at].done {
+            if turns[at].acting { turns[at].steps.append("Stopped") }
+            turns[at].waiting = nil
+            turns[at].acting = false
         }
     }
 
-    /// The offered page, opened because the person said so.
-    func follow(_ place: AIPage.Place) {
-        guard let page, let href = place.href, let at = turns.firstIndex(where: { $0.offer == place }) else { return }
-        page.go(to: href)
-        turns[at].offer = nil
-        turns[at].went = "Opened “\(place.text)”"
+    /// An action the model ended its answer with, or a place the person
+    /// named: done now, or held for their go-ahead (AIAct.caution).
+    private func act(_ action: AIAct.Action, turn id: UUID, named: Bool) {
+        guard let read, let at = turns.firstIndex(where: { $0.id == id }) else { return }
+        let place = action.index.map { read.places[$0] }
+        turns[at].acting = true
+        if let why = AIAct.caution(action, place: place, page: page?.pageAddress, request: turns[at].question ?? "",
+                                   named: named, addressed: read.addressed) {
+            turns[at].waiting = AIAct.Pending(action: action, place: place, what: AIAct.describe(action, place), why: why, named: named)
+            return
+        }
+        perform(action, place: place, turn: id, goOn: !named)
+    }
+
+    /// The step held for the go-ahead, done because the person said so.
+    func allow() {
+        guard let at = turns.lastIndex(where: { $0.waiting != nil }), let pending = turns[at].waiting else { return }
+        turns[at].waiting = nil
+        perform(pending.action, place: pending.place, turn: turns[at].id, goOn: !pending.named)
+    }
+
+    /// The step held for the go-ahead, not done: the request ends there.
+    func deny() {
+        guard let at = turns.lastIndex(where: { $0.waiting != nil }), let pending = turns[at].waiting else { return }
+        turns[at].waiting = nil
+        turns[at].acting = false
+        turns[at].steps.append("Didn't: \(pending.what)")
+    }
+
+    /// The step done on the page; then, for the model's steps, the page read
+    /// again and the model asked for the next one — up to AIAct.mostSteps.
+    /// GO is all that was asked, and a place the person named is too.
+    private func perform(_ action: AIAct.Action, place: AIPage.Place?, turn id: UUID, goOn: Bool) {
+        let generation = self.generation
+        Task { @MainActor [weak self, weak page] in
+            guard let page else {
+                // The tab is gone: nothing to do it on.
+                if let self, let at = self.turns.firstIndex(where: { $0.id == id }) { self.turns[at].acting = false }
+                return
+            }
+            let failed = await AIAct.perform(action, place: place, in: page)
+            if failed == nil, action.verb != .go || place?.kind != .section { await AIAct.settle(page) }
+            guard let self, self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            let did = AIAct.done(action, place)
+            self.turns[at].steps.append(failed.map { "Couldn't: \(AIAct.describe(action, place)) — \($0)" } ?? did)
+            guard goOn, action.verb != .go, let request = self.turns[at].question else {
+                self.turns[at].acting = false
+                return
+            }
+            guard self.turns[at].steps.count < AIAct.mostSteps else {
+                self.turns[at].steps.append("Stopped after \(AIAct.mostSteps) steps")
+                self.turns[at].acting = false
+                return
+            }
+            let fresh = await AIPage.read(page)
+            guard self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            guard let fresh else {
+                self.turns[at].steps.append("The page has nothing on it to read")
+                self.turns[at].acting = false
+                return
+            }
+            self.read = fresh
+            self.addressed = self.addressed || fresh.addressed
+            let outcome = failed.map { "\(did) didn't work: \($0)." } ?? "Done: \(did)."
+            self.withPage(AIPage.step(fresh, did: did, failed: failed, request: request, fence: self.fence),
+                          short: outcome + " (That page is left out here.)")
+            self.turns[at].answer = ""
+            self.turns[at].done = false
+            self.turns[at].failed = nil
+            self.turns[at].strays = []
+            self.run()
+        }
     }
 }
 
@@ -341,15 +422,18 @@ struct AssistantPanel: View {
             Rectangle().fill(Palette.hairline).frame(height: 1)
             HStack(spacing: 8) {
                 if drawn {
-                    Text("Ask about this page…").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
+                    Text("Ask, or tell it what to do…").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
                 } else {
-                    TextField("", text: $assistant.draft, prompt: Text("Ask about this page…").foregroundStyle(Palette.faint))
+                    TextField("", text: $assistant.draft, prompt: Text("Ask, or tell it what to do…").foregroundStyle(Palette.faint))
                         .textFieldStyle(.plain)
                         .font(.system(size: 12.5))
                         .foregroundStyle(Palette.ink)
                         .focused($typing)
                         .onSubmit { assistant.submit() }
                         .disabled(assistant.notice != nil)
+                }
+                if assistant.working {
+                    Pill("Stop") { assistant.stop() }
                 }
             }
             .padding(.horizontal, 16)
@@ -381,7 +465,7 @@ struct AssistantPanel: View {
                 caution("This page has text written for an AI to follow. The answer may have been steered by it.")
             }
             ForEach(assistant.turns) { turn in
-                TurnView(turn: turn, follow: assistant.follow).id(turn.id)
+                TurnView(turn: turn, allow: assistant.allow, deny: assistant.deny).id(turn.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -405,6 +489,9 @@ struct AssistantPanel: View {
                         .padding(.bottom, 12)
                 }
                 .onChange(of: assistant.turns.last?.answer) { _, _ in
+                    if let last = assistant.turns.last { scroller.scrollTo(last.id, anchor: .bottom) }
+                }
+                .onChange(of: assistant.turns.last?.steps.count) { _, _ in
                     if let last = assistant.turns.last { scroller.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -431,7 +518,8 @@ struct AssistantPanel: View {
 
     private struct TurnView: View {
         let turn: Assistant.Turn
-        var follow: (AIPage.Place) -> Void = { _ in }
+        var allow: () -> Void = {}
+        var deny: () -> Void = {}
 
         var body: some View {
             VStack(alignment: .leading, spacing: 6) {
@@ -456,16 +544,35 @@ struct AssistantPanel: View {
                 if let failed = turn.failed {
                     Text(verbatim: failed).font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
-                if let went = turn.went {
-                    HStack(spacing: 5) {
+                ForEach(Array(turn.steps.enumerated()), id: \.offset) { _, step in
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Image(systemName: "arrow.turn.down.right").font(.system(size: 9.5, weight: .medium))
-                        Text(verbatim: went).font(.system(size: 11.5)).lineLimit(2)
+                        Text(verbatim: step).font(.system(size: 11.5)).lineLimit(2)
                     }
                     .foregroundStyle(Palette.muted)
                 }
-                if let offer = turn.offer, let host = offer.href?.host() {
-                    Pill("Open “\(String(offer.text.prefix(40)))” · \(host)", filled: true) { follow(offer) }
-                        .help(offer.href?.absoluteString ?? "")
+                if turn.acting, turn.done, turn.waiting == nil {
+                    Text("Working on the page…").font(.system(size: 11.5)).foregroundStyle(Palette.faint)
+                }
+                if let waiting = turn.waiting {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(verbatim: waiting.what + "?")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(verbatim: waiting.why)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Palette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 8) {
+                            Pill("Allow", filled: true, action: allow)
+                            Pill("Stop", action: deny)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.wash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .help(waiting.place?.href?.absoluteString ?? waiting.action.url?.absoluteString ?? "")
                 }
                 if !turn.strays.isEmpty {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {

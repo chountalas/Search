@@ -90,7 +90,7 @@ def ask(tab, text, within=15):
     until = time.time() + within
     while time.time() < until:
         turns = ai("state").get("turns", [])
-        if len(turns) > before and turns[-1]["done"]:
+        if len(turns) > before and turns[-1]["done"] and (not turns[-1]["acting"] or turns[-1]["waiting"]):
             time.sleep(1.5)  # the scroll is smooth; the outline and the load follow
             return ai("state")["turns"][-1]
         time.sleep(0.2)
@@ -147,7 +147,7 @@ try:
     ai("use", provider="ollama", model="stand-in")
     home = sv.page(""); sv.cmd({"do": "go", "id": home, "url": f"{SITE}/"}); time.sleep(1.5)
     read = ai("read", id=home)
-    kinds = [(k, text) for k, text, _ in read["places"]]
+    kinds = [(p[0], p[1]) for p in read["places"]]
     t.ok("read: the headings are places", ("section", "Pricing") in kinds and ("section", "Contact") in kinds, kinds)
     t.ok("read: the links are places", ("link", "Careers") in kinds and ("link", "Partner site") in kinds, kinds)
     t.ok("before: at the top", top(home, "pricing") > 1000, top(home, "pricing"))
@@ -166,18 +166,18 @@ try:
          re.search(r"<page-\w+>[\s\S]*Places on this page:[\s\S]*Pricing[\s\S]*</page-\w+>", prompt[-1]["content"]) is not None)
     t.ok("prompt: the system says how to answer with GO", "GO 7" in prompt[0]["content"])
     t.ok("prompt: the reminder sits under the request, outside the fence",
-         prompt[-1]["content"].rstrip().endswith("Otherwise don't write GO.)"))
+         prompt[-1]["content"].rstrip().endswith("write no action line.)"))
     t.ok("costs: the model's pick is scrolled to", -5 <= top(home, "pricing") <= 60, top(home, "pricing"))
     t.ok("costs: the GO line isn't shown", "GO" not in turn.get("shown", "GO") and turn["shown"].startswith("Taking you"), turn)
 
     turn = ask(home, "what is this page about")
-    t.ok("plain question: answered, nowhere to go", turn.get("went") == "" and turn.get("offer") == "", turn)
+    t.ok("plain question: answered, nowhere to go", turn.get("went") == "" and turn.get("waiting") == "" and turn.get("steps") == [], turn)
 
     sent = len(asked)
     turn = ask(home, "where could I work here?")
     t.ok("model's link pick: the model is asked", len(asked) == sent + 1, len(asked) - sent)
-    t.ok("model's link pick: offered as a button, not opened", url(home) == f"{SITE}/" and turn.get("offer", "").endswith("/careers")
-         and turn.get("went") == "", (url(home), turn))
+    t.ok("model's link pick: same site, nothing weighty, so opened", url(home) == f"{SITE}/careers" and turn.get("went") == "Opened “Careers”", (url(home), turn))
+    sv.cmd({"do": "go", "id": home, "url": f"{SITE}/"}); time.sleep(1.5)
 
     turn = ask(home, "open the careers page")
     t.ok("careers: the same site's page opens in this tab", url(home) == f"{SITE}/careers", url(home))
@@ -190,7 +190,9 @@ try:
 
     sv.cmd({"do": "go", "id": home, "url": f"{SITE}/"}); time.sleep(1.5)
     turn = ask(home, "go to the partner site")
-    t.ok("partner: another site is offered, not opened", url(home) == f"{SITE}/" and turn.get("offer", "").endswith("/partner"), (url(home), turn))
+    t.ok("partner: another site waits for a go-ahead", url(home) == f"{SITE}/" and turn.get("waitingURL", "").endswith("/partner"), (url(home), turn))
+    ai("allow"); time.sleep(1.5)
+    t.ok("partner: allowed, it opens", url(home).endswith("/partner"), url(home))
 finally:
     t.done(); sv.finish()
 sys.exit(1 if t.failed else 0)
