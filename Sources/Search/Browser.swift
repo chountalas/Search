@@ -4176,6 +4176,13 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             return
         }
 
+        // The AI taking a step on this tab (Connor's fork, AIAct.holds): a
+        // page on another site waits for the person.
+        if action.targetFrame?.isMainFrame ?? true, let tab = tab(for: webView), AIAct.holds(url, in: tab) {
+            decisionHandler(.cancel)
+            return
+        }
+
         // 0.0.0.0, as a dev server prints it: this Mac, as localhost (see
         // Address.reachable). Only the page itself; a frame goes nowhere.
         if action.targetFrame?.isMainFrame == true, let local = Address.reachable(url) {
@@ -4356,6 +4363,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         for action: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
+        // No window from a step the AI is taking (Connor's fork, AIAct.holds)
+        // without the person's go-ahead.
+        if let opener = tab(for: webView), AIAct.holds(action.request.url ?? URL(string: "about:blank")!, in: opener, window: true) {
+            return nil
+        }
         let from = tab(for: webView)?.id ?? activeID
         // WebKit's copy of the opener's configuration still holds the
         // opener's user content controller — its scripts and its message

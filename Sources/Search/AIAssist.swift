@@ -249,14 +249,14 @@ final class Assistant: ObservableObject, Identifiable {
             turns[at].waiting = AIAct.Pending(action: action, place: place, what: AIAct.describe(action, place), why: why, named: named)
             return
         }
-        perform(action, place: place, turn: id, goOn: !named)
+        perform(action, place: place, turn: id, goOn: !named, approved: false)
     }
 
     /// The step held for the go-ahead, done because the person said so.
     func allow() {
         guard let at = turns.lastIndex(where: { $0.waiting != nil }), let pending = turns[at].waiting else { return }
         turns[at].waiting = nil
-        perform(pending.action, place: pending.place, turn: turns[at].id, goOn: !pending.named)
+        perform(pending.action, place: pending.place, turn: turns[at].id, goOn: !pending.named, approved: true)
     }
 
     /// The step held for the go-ahead, not done: the request ends there.
@@ -270,7 +270,7 @@ final class Assistant: ObservableObject, Identifiable {
     /// The step done on the page; then, for the model's steps, the page read
     /// again and the model asked for the next one — up to AIAct.mostSteps.
     /// GO is all that was asked, and a place the person named is too.
-    private func perform(_ action: AIAct.Action, place: AIPage.Place?, turn id: UUID, goOn: Bool) {
+    private func perform(_ action: AIAct.Action, place: AIPage.Place?, turn id: UUID, goOn: Bool, approved: Bool) {
         let generation = self.generation
         Task { @MainActor [weak self, weak page] in
             guard let page else {
@@ -278,11 +278,23 @@ final class Assistant: ObservableObject, Identifiable {
                 if let self, let at = self.turns.firstIndex(where: { $0.id == id }) { self.turns[at].acting = false }
                 return
             }
+            // A step the person didn't look at first is watched as it goes:
+            // a page it opens on another site is stopped and waits.
+            let watched = !approved && [.click, .type, .enter, .pick, .scroll].contains(action.verb)
+            if watched { AIAct.watch(page, request: self?.turns.first(where: { $0.id == id })?.question ?? "") }
             let failed = await AIAct.perform(action, place: place, in: page)
             if failed == nil, action.verb != .go || place?.kind != .section { await AIAct.settle(page) }
+            let held = watched ? AIAct.unwatch(page) : nil
             guard let self, self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
             let did = AIAct.done(action, place)
             self.turns[at].steps.append(failed.map { "Couldn't: \(AIAct.describe(action, place)) — \($0)" } ?? did)
+            if let held {
+                let host = held.host().map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } ?? "another site"
+                self.turns[at].waiting = AIAct.Pending(action: AIAct.Action(verb: .visit, url: held), place: nil,
+                                                       what: "Open \(host)", why: "The page tried to take it to another site.",
+                                                       named: !goOn)
+                return
+            }
             guard goOn, action.verb != .go, let request = self.turns[at].question else {
                 self.turns[at].acting = false
                 return

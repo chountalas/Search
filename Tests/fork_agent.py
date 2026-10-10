@@ -42,6 +42,8 @@ SHOP = """<!doctype html><title>Trail Shop</title>
 <button type="button" onclick="window.deleted = true">Delete account</button>
 <a href="/logout">Sign out</a>
 <a href="http://localhost:PORT/partner">Partner store</a>
+<a role="button" href="http://localhost:PORT/sneaky">Sneaky deal</a>
+<button type="button" onclick="location.href = 'http://localhost:PORT/redirected'">Show deal</button>
 <form action="http://localhost:PORT/collect" role="search"><input type="search" aria-label="Search partners"></form>
 <form action="/subscribe" method="post" role="search"><input type="search" aria-label="Search newsletters"><button>Find</button></form>
 <div role="dialog" aria-modal="true"><p>Remove the trail runner?</p>
@@ -66,6 +68,11 @@ class Site(BaseHTTPRequestHandler):
             body = f"<!doctype html><title>Results</title><h1>Results for {q}</h1><p>Three shoes found.</p>"
         elif url.path == "/sent":
             body = "<!doctype html><title>Sent</title><h1>Message sent</h1>"
+        elif url.path == "/based":
+            body = (f"<!doctype html><base href='http://localhost:{port}/'><title>Based</title><h1>Based</h1>"
+                    "<form action='/find' role='search'><input type='search' aria-label='Find things'></form>"
+                    f"<form action='http://127.0.0.1:{port}/q' role='search'><input type='search' aria-label='Search here'>"
+                    "<input name='action' type='hidden' value='http://localhost/'></form>")
         elif url.path == "/trick":
             body = TRICK
         elif url.path == "/long":
@@ -240,6 +247,22 @@ try:
     ai("deny"); time.sleep(0.5)
     turn = ask(tab, "close that popup", [("Closing it.", "CLICK", "Close", None), "Closed."])
     t.ok("dialog: closing it doesn't wait", ev(tab, "window.dismissed === true") is True and turn.get("waiting") == "", turn)
+
+    fresh(tab, "/shop")
+    turn = ask(tab, "get me the sneaky deal", [("Opening it.", "CLICK", "Sneaky deal", None)])
+    t.ok("markup: a link calling itself a button is still checked", "another site" in turn.get("why", "") and "/sneaky" not in hits, turn)
+    ai("deny"); time.sleep(0.5)
+    turn = ask(tab, "press the show deal button", [("Showing it.", "CLICK", "Show deal", None), "Here it is."])
+    t.ok("script: a press that sends the page elsewhere is stopped", turn.get("steps") == ["Clicked “Show deal”"]
+         and turn.get("waiting", "").startswith("Open localhost") and "/redirected" not in hits, turn)
+    ai("allow"); turn = settled()
+    t.ok("script: allowed, it goes, and carries on", sv.ev(tab, "location.pathname") == "/redirected" and turn["shown"] == "Here it is." and not turn["acting"], turn)
+
+    fresh(tab, "/based")
+    read = ai("read", id=tab)
+    places = {(p[0], p[1]): p for p in read["places"]}
+    t.ok("base: a form sent through the page's base address is elsewhere", places.get(("field", "Find things"), [""] * 5)[4] == "elsewhere", read["places"])
+    t.ok("clobbered: a field named action can't stand in for the form's", places.get(("field", "Search here"), [""] * 5)[4] == "search", read["places"])
 
     fresh(tab, "/shop")
     turn = ask(tab, "open the partner store", [("Opening it.", "CLICK", "Partner store", None)])

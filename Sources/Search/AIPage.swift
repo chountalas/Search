@@ -585,17 +585,20 @@ enum AIPage {
       }
       // "elsewhere" when it sends to another site, "post" when it posts,
       // "search" for a search of this same site, "form" for anything else.
+      // Read through Element's own methods: a form's fields can be named to
+      // stand in for its properties (a field called "action").
+      function attr(node, name) { return Element.prototype.getAttribute.call(node, name); }
       function formOf(el) {
         var f = el.form || (el.closest && el.closest('form'));
         if (!f) return '';
         var to;
-        try { to = new URL(el.getAttribute('formaction') || f.getAttribute('action') || location.href, location.href); }
+        // Against the page's base address, as the browser sends it.
+        try { to = new URL(attr(el, 'formaction') || attr(f, 'action') || document.baseURI, document.baseURI); }
         catch (e) { return 'form'; }
         if (to.host !== location.host) return 'elsewhere';
-        if ((el.getAttribute('formmethod') || f.getAttribute('method') || 'get').toLowerCase() !== 'get') return 'post';
-        var about = (f.getAttribute('action') || '') + ' ' + (f.id || '') + ' ' +
-          (typeof f.className === 'string' ? f.className : '') + ' ' + (f.getAttribute('aria-label') || '');
-        if (f.getAttribute('role') === 'search' || f.querySelector('input[type="search"]') || /search|[?&]q=/i.test(about)) return 'search';
+        if ((attr(el, 'formmethod') || attr(f, 'method') || 'get').toLowerCase() !== 'get') return 'post';
+        var about = (attr(f, 'action') || '') + ' ' + (attr(f, 'id') || '') + ' ' + (attr(f, 'class') || '') + ' ' + (attr(f, 'aria-label') || '');
+        if (attr(f, 'role') === 'search' || Element.prototype.querySelector.call(f, 'input[type="search"]') || /search|[?&]q=/i.test(about)) return 'search';
         return 'form';
       }
       var controls = document.querySelectorAll('a[href], button, input, textarea, select, summary, [role="button"], ' +
@@ -605,10 +608,13 @@ enum AIPage {
       for (var c = 0; c < controls.length && c < 5000; c++) {
         var el = controls[c], tag = el.tagName, role = el.getAttribute('role') || '', item = null, words;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-        if (tag === 'A' && !role) {
+        // A link is a link whatever role it claims: its address is checked.
+        if (tag === 'A' && /^https?:/i.test(el.href)) {
           words = label(el);
-          if (!/^https?:/.test(el.href) || hrefs[el.href] || !words) continue;
+          if (hrefs[el.href] || !words) continue;
           item = { kind: 'link', text: words, href: el.href };
+        } else if (tag === 'A' && !role) {
+          continue;
         } else if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable || /^(textbox|searchbox|combobox)$/.test(role)) {
           var type = (el.getAttribute('type') || (tag === 'INPUT' ? 'text' : '')).toLowerCase();
           var fill = el.getAttribute('autocomplete') || '';

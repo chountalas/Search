@@ -17,7 +17,8 @@ import WebKit
 // press whose words or address say buy, send, delete, sign out and the
 // like, anything that sends a form other than a search of this same site,
 // and any yes in a dialog. On a page with words written for an AI, every
-// action but a scroll waits.
+// action but a scroll waits. And whatever the markup says, a step that
+// takes the page to another site is stopped as it goes (holds) and waits.
 
 enum AIAct {
     enum Verb: String, CaseIterable {
@@ -201,6 +202,46 @@ enum AIAct {
                      ("Click ", "Clicked "), ("Type ", "Typed "), ("Press ", "Pressed "), ("Choose ", "Chose "), ("Go back", "Went back")]
         for (now, then) in swaps where said.hasPrefix(now) { return then + said.dropFirst(now.count) }
         return said
+    }
+
+    // MARK: - where a step may take the page
+
+    /// A step the model chose, under way on a tab: the site it started on,
+    /// what the person's request named, and the first page elsewhere that
+    /// was held. Every page load in the tab while it lasts — from a link, a
+    /// form, a script, a redirect — is checked here as WebKit itself has
+    /// resolved it (Browser.decide), not as the page's markup suggests, and
+    /// one to another site is cancelled and held for the person.
+    struct Watch {
+        let site: URL?
+        let request: String
+        var held: URL?
+    }
+
+    @MainActor private static var watching: [ObjectIdentifier: Watch] = [:]
+
+    @MainActor static func watch(_ tab: Tab, request: String) {
+        watching[ObjectIdentifier(tab)] = Watch(site: tab.pageAddress, request: request)
+    }
+
+    /// The watch over, and the page elsewhere it held, if any.
+    @MainActor static func unwatch(_ tab: Tab) -> URL? {
+        watching.removeValue(forKey: ObjectIdentifier(tab))?.held
+    }
+
+    /// Whether a page load in `tab`'s own frame, or a window it opens, waits.
+    /// Another app's link (mail, calls, an app's own scheme) waits too.
+    @MainActor static func holds(_ url: URL, in tab: Tab, window: Bool = false) -> Bool {
+        guard var watch = watching[ObjectIdentifier(tab)] else { return false }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if ["http", "https"].contains(scheme) {
+            if !window, AIPage.sameSite(url, watch.site) { return false }
+            if asked(for: url, in: watch.request), !window { return false }
+            if watch.held == nil { watch.held = url }
+            watching[ObjectIdentifier(tab)] = watch
+            return true
+        }
+        return window || !["about", "blob", "data", "javascript"].contains(scheme)
     }
 
     // MARK: - doing it
