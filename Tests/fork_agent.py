@@ -43,6 +43,8 @@ SHOP = """<!doctype html><title>Trail Shop</title>
 <a href="/logout">Sign out</a>
 <a href="http://localhost:PORT/partner">Partner store</a>
 <a role="button" href="http://localhost:PORT/sneaky">Sneaky deal</a>
+<form action="/send2" method="post"><button>Send feedback</button></form>
+<a id="cancel" href="/cancel">Cancel subscription</a>
 <button type="button" onclick="location.href = 'http://localhost:PORT/redirected'">Show deal</button>
 <form action="http://localhost:PORT/collect" role="search"><input type="search" aria-label="Search partners"></form>
 <form action="/subscribe" method="post" role="search"><input type="search" aria-label="Search newsletters"><button>Find</button></form>
@@ -73,6 +75,9 @@ class Site(BaseHTTPRequestHandler):
                     "<form action='/find' role='search'><input type='search' aria-label='Find things'></form>"
                     f"<form action='http://127.0.0.1:{port}/q' role='search'><input type='search' aria-label='Search here'>"
                     "<input name='action' type='hidden' value='http://localhost/'></form>")
+        elif url.path == "/drift":
+            body = (f"<!doctype html><title>Drift</title><h1>Drift</h1><button type='button' "
+                    f"onclick=\"setTimeout(function () {{ location.href = 'http://localhost:{port}/away' }}, 1200)\">Next</button>")
         elif url.path == "/trick":
             body = TRICK
         elif url.path == "/long":
@@ -82,6 +87,13 @@ class Site(BaseHTTPRequestHandler):
         data = body.encode()
         self.send_response(200); self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
+    def do_POST(self):
+        hits.append(self.path)
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        # Sent, then sent on to another site.
+        self.send_response(302); self.send_header("Location", f"http://localhost:{self.server.server_port}/collected")
+        self.send_header("Content-Length", "0"); self.end_headers()
 
     def log_message(self, *a): pass
 
@@ -105,7 +117,9 @@ class Model(BaseHTTPRequestHandler):
         last = [m["content"] for m in body["messages"] if m["role"] == "user"][-1]
         step = script.pop(0) if script else "That's done."
         if isinstance(step, tuple):
-            sentence, verb, label, words = step
+            sentence, verb, label, words = step[:4]
+            if len(step) > 4:
+                time.sleep(step[4])  # thinking a while
             line = verb
             if label is not None:
                 line += " " + number(last, label)
@@ -257,6 +271,31 @@ try:
          and turn.get("waiting", "").startswith("Open localhost") and "/redirected" not in hits, turn)
     ai("allow"); turn = settled()
     t.ok("script: allowed, it goes, and carries on", sv.ev(tab, "location.pathname") == "/redirected" and turn["shown"] == "Here it is." and not turn["acting"], turn)
+
+    turn = ask(tab, "find it on example", [("Opening.", "VISIT", None, "https://example.xyz/")])
+    t.ok("named: a bare name isn't a site, so a look-alike waits", turn.get("waitingURL") == "https://example.xyz/", turn)
+    ai("deny"); time.sleep(0.5)
+
+    fresh(tab, "/shop")
+    turn = ask(tab, "send them feedback", [("Sending.", "CLICK", "Send feedback", None), "Sent."])
+    t.ok("allowed: the send waits", turn.get("waiting") == "Click “Send feedback”", turn)
+    ai("allow"); turn = settled()
+    t.ok("allowed: where it then leads, elsewhere, still waits", "/send2" in hits and "/collected" not in hits
+         and turn.get("waiting", "").startswith("Open localhost"), turn)
+    ai("deny"); time.sleep(0.5)
+
+    fresh(tab, "/shop")
+    turn = ask(tab, "cancel my subscription", [("Cancelling.", "CLICK", "Cancel subscription", None)])
+    t.ok("changed: the cancel waits", turn.get("waiting") == "Click “Cancel subscription”", turn)
+    ev(tab, "document.getElementById('cancel').href = '/other'")
+    ai("allow"); turn = settled()
+    t.ok("changed: a link changed after it was allowed isn't followed", "/other" not in hits and "/cancel" not in hits
+         and "changed after you allowed it" in turn["steps"][-1], turn)
+
+    fresh(tab, "/drift")
+    turn = ask(tab, "go through the steps", [("Next.", "CLICK", "Next", None), ("Next again.", "CLICK", "Next", None, 2.5), "Done."])
+    t.ok("drift: a page that goes elsewhere by itself between steps ends it", turn["steps"][-1].startswith("Stopped: the page went to localhost")
+         and not turn["acting"] and len(turn["steps"]) == 2, turn)
 
     fresh(tab, "/based")
     read = ai("read", id=tab)

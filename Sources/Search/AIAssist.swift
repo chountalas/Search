@@ -64,6 +64,9 @@ final class Assistant: ObservableObject, Identifiable {
     /// The last message with the page in it, and what it is cut down to
     /// when the next one comes: only the page as it is now goes whole.
     private var lastPage: (index: Int, short: String)?
+    /// The sites this request may take the page to: the one it started on,
+    /// and each one since that the person allowed or named.
+    private var sites: [URL] = []
 
     init(tab: Tab, provider: AIProvider, model: String, summary: Bool) {
         self.tab = tab.id
@@ -243,13 +246,27 @@ final class Assistant: ObservableObject, Identifiable {
     private func act(_ action: AIAct.Action, turn id: UUID, named: Bool) {
         guard let read, let at = turns.firstIndex(where: { $0.id == id }) else { return }
         let place = action.index.map { read.places[$0] }
+        if !turns[at].acting { sites = [page?.pageAddress].compactMap { $0 } }
         turns[at].acting = true
+        // Taken somewhere by the page itself since the last step — a
+        // redirect a while after it, say: no step is taken there.
+        guard onCourse else {
+            turns[at].steps.append("Stopped: the page went to \(page?.pageAddress?.host() ?? "another site") by itself")
+            turns[at].acting = false
+            return
+        }
         if let why = AIAct.caution(action, place: place, page: page?.pageAddress, request: turns[at].question ?? "",
                                    named: named, addressed: read.addressed) {
             turns[at].waiting = AIAct.Pending(action: action, place: place, what: AIAct.describe(action, place), why: why, named: named)
             return
         }
         perform(action, place: place, turn: id, goOn: !named, approved: false)
+    }
+
+    /// The page is on a site this request may be on.
+    private var onCourse: Bool {
+        guard let here = page?.pageAddress, !sites.isEmpty else { return true }
+        return sites.contains { AIPage.sameSite(here, $0) }
     }
 
     /// The step held for the go-ahead, done because the person said so.
@@ -278,14 +295,20 @@ final class Assistant: ObservableObject, Identifiable {
                 if let self, let at = self.turns.firstIndex(where: { $0.id == id }) { self.turns[at].acting = false }
                 return
             }
-            // A step the person didn't look at first is watched as it goes:
-            // a page it opens on another site is stopped and waits.
-            let watched = !approved && [.click, .type, .enter, .pick, .scroll].contains(action.verb)
-            if watched { AIAct.watch(page, request: self?.turns.first(where: { $0.id == id })?.question ?? "") }
-            let failed = await AIAct.perform(action, place: place, in: page)
+            // Every step is watched as it goes: the page may go to the sites
+            // this request is on, and to where this step was meant to go —
+            // a link or address that passed AIAct.caution, or what the
+            // person allowed. Anywhere else is stopped and waits.
+            let meant = [action.url, place?.href] + (approved ? [place?.target] : [])
+            let allowed = (self?.sites ?? []) + meant.compactMap { $0 }
+            AIAct.watch(page, sites: allowed)
+            let failed = await AIAct.perform(action, place: place, in: page, checked: approved)
             if failed == nil, action.verb != .go || place?.kind != .section { await AIAct.settle(page) }
-            let held = watched ? AIAct.unwatch(page) : nil
+            let held = AIAct.unwatch(page)
             guard let self, self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            if let here = page.pageAddress, held == nil, !self.onCourse, allowed.contains(where: { AIPage.sameSite(here, $0) }) {
+                self.sites.append(here)
+            }
             let did = AIAct.done(action, place)
             self.turns[at].steps.append(failed.map { "Couldn't: \(AIAct.describe(action, place)) — \($0)" } ?? did)
             if let held {
@@ -296,6 +319,11 @@ final class Assistant: ObservableObject, Identifiable {
                 return
             }
             guard goOn, action.verb != .go, let request = self.turns[at].question else {
+                self.turns[at].acting = false
+                return
+            }
+            guard self.onCourse else {
+                self.turns[at].steps.append("Stopped: the page went to \(page.pageAddress?.host() ?? "another site") by itself")
                 self.turns[at].acting = false
                 return
             }

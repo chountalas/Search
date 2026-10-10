@@ -47,8 +47,10 @@ enum AIPage {
         /// never what is typed in it.
         var detail = ""
         /// The form a button or field sends: "search" (of this site), "post",
-    /// "elsewhere" (another site), "form", or "" for none.
+        /// "elsewhere" (another site), "form", or "" for none.
         var form = ""
+        /// Where that form sends it, as the browser resolves it.
+        var target: URL?
     }
 
     /// About 6,000 tokens: the start and the end of a longer page.
@@ -77,7 +79,9 @@ enum AIPage {
             return Place(kind: kind == .link && href == nil ? .button : kind,
                          text: String((place["text"] as? String ?? "").prefix(100)), href: href,
                          detail: String((place["detail"] as? String ?? "").prefix(300)),
-                         form: place["form"] as? String ?? "")
+                         form: place["form"] as? String ?? "",
+                         target: (place["target"] as? String).flatMap(URL.init(string:))
+                            .flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil })
         }
         return read
     }
@@ -588,6 +592,12 @@ enum AIPage {
       // Read through Element's own methods: a form's fields can be named to
       // stand in for its properties (a field called "action").
       function attr(node, name) { return Element.prototype.getAttribute.call(node, name); }
+      function formTarget(el) {
+        var f = el.form || (el.closest && el.closest('form'));
+        if (!f) return '';
+        try { return new URL(attr(el, 'formaction') || attr(f, 'action') || document.baseURI, document.baseURI).href; }
+        catch (e) { return ''; }
+      }
       function formOf(el) {
         var f = el.form || (el.closest && el.closest('form'));
         if (!f) return '';
@@ -645,6 +655,7 @@ enum AIPage {
         }
         if (!item.text || item.text.length > 100 || !inSight(el)) continue;
         if (item.href) hrefs[item.href] = 1;
+        if (item.form) item.target = formTarget(el);
         var box = el.getBoundingClientRect();
         found.push({ el: el, item: item, at: c, near: Math.abs(box.top + box.height / 2 - middle) });
       }

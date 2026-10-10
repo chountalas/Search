@@ -167,17 +167,15 @@ enum AIAct {
             ? "This page has text written for an AI, so Search asks first." : nil
     }
 
-    /// Whether the person's own request names the site: "go to amazon and…"
-    /// lets the model open amazon.com, never amazon.com.example.io.
+    /// Whether the person's own request names the site, whole: "go to
+    /// amazon.com" lets the model open amazon.com — never amazon.xyz, or
+    /// amazon.com.example.io, and a bare "amazon" names no site at all.
     nonisolated static func asked(for url: URL, in request: String) -> Bool {
-        guard var host = url.host()?.lowercased() else { return false }
+        guard var host = url.host()?.lowercased(), host.contains(".") else { return false }
         if host.hasPrefix("www.") { host.removeFirst(4) }
-        let labels = host.split(separator: ".")
-        guard labels.count >= 2 else { return false }
-        let name = String(labels[labels.count - 2])
-        guard name.count >= 3 else { return false }
-        let said = request.lowercased()
-        return said.contains(host) || said.range(of: "\\b\(NSRegularExpression.escapedPattern(for: name))\\b", options: .regularExpression) != nil
+        let name = NSRegularExpression.escapedPattern(for: host)
+        return request.lowercased().range(of: "(?<![a-z0-9.-])(www\\.)?\(name)(?![a-z0-9-]|\\.[a-z0-9])",
+                                          options: .regularExpression) != nil
     }
 
     /// The action in words, for the list under the answer and the go-ahead.
@@ -206,22 +204,23 @@ enum AIAct {
 
     // MARK: - where a step may take the page
 
-    /// A step the model chose, under way on a tab: the site it started on,
-    /// what the person's request named, and the first page elsewhere that
-    /// was held. Every page load in the tab while it lasts — from a link, a
-    /// form, a script, a redirect — is checked here as WebKit itself has
-    /// resolved it (Browser.decide), not as the page's markup suggests, and
-    /// one to another site is cancelled and held for the person.
+    /// A step under way on a tab: the sites it may take the page to — the
+    /// ones this request has been on, and the one the person just allowed —
+    /// and the first page elsewhere that was held. Every page load in the
+    /// tab while it lasts — from a link, a form, a script, a redirect — is
+    /// checked here as WebKit itself resolved it (Browser.decide), not as the
+    /// page's markup suggests, and one to any other site is cancelled and
+    /// held for the person. An allowed step is watched too: allowing "Send
+    /// message" allows that form's own site, not wherever it leads.
     struct Watch {
-        let site: URL?
-        let request: String
+        let sites: [URL]
         var held: URL?
     }
 
     @MainActor private static var watching: [ObjectIdentifier: Watch] = [:]
 
-    @MainActor static func watch(_ tab: Tab, request: String) {
-        watching[ObjectIdentifier(tab)] = Watch(site: tab.pageAddress, request: request)
+    @MainActor static func watch(_ tab: Tab, sites: [URL]) {
+        watching[ObjectIdentifier(tab)] = Watch(sites: sites)
     }
 
     /// The watch over, and the page elsewhere it held, if any.
@@ -235,8 +234,7 @@ enum AIAct {
         guard var watch = watching[ObjectIdentifier(tab)] else { return false }
         let scheme = url.scheme?.lowercased() ?? ""
         if ["http", "https"].contains(scheme) {
-            if !window, AIPage.sameSite(url, watch.site) { return false }
-            if asked(for: url, in: watch.request), !window { return false }
+            if !window, watch.sites.contains(where: { AIPage.sameSite(url, $0) }) { return false }
             if watch.held == nil { watch.held = url }
             watching[ObjectIdentifier(tab)] = watch
             return true
@@ -248,7 +246,7 @@ enum AIAct {
 
     /// The action, done on the page. Nil when it went; why not otherwise.
     @MainActor
-    static func perform(_ action: Action, place: AIPage.Place?, in tab: Tab) async -> String? {
+    static func perform(_ action: Action, place: AIPage.Place?, in tab: Tab, checked: Bool = false) async -> String? {
         switch action.verb {
         case .visit:
             guard let url = action.url else { return "no address" }
@@ -271,6 +269,10 @@ enum AIAct {
         guard let web = tab.built else { return "the page isn't open" }
         let result = try? await web.callAsyncJavaScript(script, arguments: [
             "n": action.index ?? -1, "verb": action.verb.rawValue, "text": action.text,
+            // Allowed by the person: still the link, or still the words, they
+            // were shown — a page can change an element after it was read.
+            "href": checked ? place?.href?.absoluteString ?? "" : "",
+            "words": checked && place?.kind == .button ? Self.bare(place?.text ?? "") : "",
         ], in: nil, contentWorld: Web.world)
         let said = result as? String ?? "the page didn't answer"
         return said == "ok" ? nil : said
@@ -292,6 +294,13 @@ enum AIAct {
         try? await Task.sleep(for: .milliseconds(loaded ? 500 : 400))
     }
 
+    /// A button's words without the state AIPage.read added to them.
+    nonisolated static func bare(_ text: String) -> String {
+        var words = text
+        for state in [" (ticked)", " (not ticked)"] where words.hasSuffix(state) { words.removeLast(state.count) }
+        return words
+    }
+
     /// Run in Search's own world: the element AIPage.read kept, outlined,
     /// then pressed, filled in or chosen from, the way a person would.
     static let script = """
@@ -301,6 +310,11 @@ enum AIAct {
       return 'ok';
     }
     if (!el || !el.isConnected) return "it isn't on the page any more";
+    if (href && el.href !== href) return 'it changed after you allowed it';
+    if (words) {
+      var now = [el.innerText, el.value, el.getAttribute('aria-label'), el.title, el.alt].join(' ').replace(/\\s+/g, ' ');
+      if (now.indexOf(words) < 0) return 'it changed after you allowed it';
+    }
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     try {
       el.animate([{ outline: '3px solid rgba(255, 176, 0, 0.95)', outlineOffset: '3px' },
