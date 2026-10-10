@@ -138,6 +138,11 @@ elif mode == "escape":
     stray = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True, stdout=sys.stdout)
     open(os.path.join(work, "stray"), "w").write(str(stray.pid))
     say("Answered, with a stray left behind.")
+elif mode == "linger":
+    # Answered, then slow to go, as Codex is.
+    say("Quick.")
+    sys.stdout.flush()
+    time.sleep(30)
 elif mode == "group":
     # Out, as both real programs can: a signal to its whole process group.
     import signal
@@ -409,6 +414,17 @@ try:
     mode("say:fine")
     got = ai_said("ask", provider="chatGPTPlan", model="gpt-6-luna", text="hi")
     t.ok("codex: one that runs without them is fine", got.get("text") == "fine", got)
+    # The answer once it's whole, not when the program gets round to going.
+    mode("linger")
+    start = time.time()
+    got = ai_said("ask", provider="chatGPTPlan", text="hi")
+    took, pid = time.time() - start, runs()[-1]["pid"]
+    t.ok("codex: the answer comes once it's whole, not when the program goes", got.get("text") == "Quick." and took < 4
+         and alive(pid), (got, took))
+    until = time.time() + 15
+    while alive(pid) and time.time() < until: time.sleep(0.5)
+    t.ok("codex: and a program that lingers is ended after a while", not alive(pid), pid)
+    t.ok("codex: no plugin looked up first", {"plugins", "remote_plugin"} <= {runs()[-1]["args"][i + 1] for i, a in enumerate(runs()[-1]["args"]) if a == "--disable"})
     mode("error")
     turn = ask(tab2, "anything else?")
     t.ok("codex: the provider's error, out of its JSON", turn.get("failed")

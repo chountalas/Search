@@ -508,7 +508,7 @@ struct SideBar: View {
         VStack(alignment: .leading, spacing: 0) {
             listed
             // The space's bookmarks, under its pins (Connor's fork, see Shelf).
-            ShelfView(browser: browser, bookmarks: browser.bookmarks)
+            ShelfView(browser: browser, space: browser.space, tab: browser.active, bookmarks: browser.bookmarks)
             loose
             newTab
         }

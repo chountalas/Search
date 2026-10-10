@@ -235,6 +235,8 @@ final class Browser: NSObject, ObservableObject {
             Task { @MainActor in
                 for (host, data) in icons { await Favicons.shared.adopt(data, for: host) }
                 self.objectWillChange.send()
+                // The shelf watches the bookmarks, not the browser (see Shelf).
+                self.bookmarks.objectWillChange.send()
             }
         }
         return (count, already, kept)

@@ -191,7 +191,9 @@ try:
     sv.cmd({"do": "go", "id": home, "url": f"{SITE}/"}); time.sleep(1.5)
     turn = ask(home, "go to the partner site")
     t.ok("partner: another site waits for a go-ahead", url(home) == f"{SITE}/" and turn.get("waitingURL", "").endswith("/partner"), (url(home), turn))
-    ai("allow"); time.sleep(1.5)
+    ai("allow")
+    until = time.time() + 10  # a busy machine can be slow to start the load
+    while time.time() < until and not url(home).endswith("/partner"): time.sleep(0.1)
     t.ok("partner: allowed, it opens", url(home).endswith("/partner"), url(home))
 finally:
     t.done(); sv.finish()

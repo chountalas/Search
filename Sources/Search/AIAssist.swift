@@ -222,9 +222,10 @@ final class Assistant: ObservableObject, Identifiable {
             // page goes again with the next one if it was the first.
             messages.removeLast()
         }
-        if failed == nil, !stopped, turn.question != nil,
-           let action = AIAct.parse(turn.answer, count: read.places.count) {
-            act(action, turn: id, named: false)
+        let row = failed == nil && !stopped && turn.question != nil
+            ? AIAct.parseAll(turn.answer, count: read.places.count) : AIAct.Row()
+        if let first = row.actions.first {
+            act(first, then: Array(row.actions.dropFirst()), turn: id, named: false, finishing: row.done, written: read)
         } else {
             turns[turns.count - 1].acting = false
         }
@@ -242,8 +243,14 @@ final class Assistant: ObservableObject, Identifiable {
     }
 
     /// An action the model ended its answer with, or a place the person
-    /// named: done now, or held for their go-ahead (AIAct.caution).
-    private func act(_ action: AIAct.Action, turn id: UUID, named: Bool) {
+    /// named: done now, or held for their go-ahead (AIAct.caution). `rest`:
+    /// the actions after it in the same answer; `did`: what that answer's
+    /// row has done so far; `finishing`: the answer ended with DONE;
+    /// `written`: the page as the model saw it when it wrote the row. A
+    /// row is cut off at an action that waits: once allowed, the model is
+    /// asked again from the page as it is.
+    private func act(_ action: AIAct.Action, then rest: [AIAct.Action] = [], turn id: UUID, named: Bool, did: [String] = [],
+                     finishing: Bool = false, written: AIPage.Read? = nil) {
         guard let read, let at = turns.firstIndex(where: { $0.id == id }) else { return }
         let place = action.index.map { read.places[$0] }
         if !turns[at].acting { sites = [page?.pageAddress].compactMap { $0 } }
@@ -255,12 +262,16 @@ final class Assistant: ObservableObject, Identifiable {
             turns[at].acting = false
             return
         }
+        // Once a page of this request had words for an AI, the rest of the
+        // request is taken as having them too.
         if let why = AIAct.caution(action, place: place, page: page?.pageAddress, request: turns[at].question ?? "",
-                                   named: named, addressed: read.addressed) {
-            turns[at].waiting = AIAct.Pending(action: action, place: place, what: AIAct.describe(action, place), why: why, named: named)
+                                   named: named, addressed: addressed || read.addressed) {
+            turns[at].waiting = AIAct.Pending(action: action, place: place, what: AIAct.describe(action, place), why: why,
+                                              named: named, did: did, last: finishing && rest.isEmpty)
             return
         }
-        perform(action, place: place, turn: id, goOn: !named, approved: false)
+        perform(action, place: place, turn: id, goOn: !named, approved: false, then: rest, did: did, finishing: finishing,
+                written: written)
     }
 
     /// The page is on a site this request may be on.
@@ -273,7 +284,8 @@ final class Assistant: ObservableObject, Identifiable {
     func allow() {
         guard let at = turns.lastIndex(where: { $0.waiting != nil }), let pending = turns[at].waiting else { return }
         turns[at].waiting = nil
-        perform(pending.action, place: pending.place, turn: turns[at].id, goOn: !pending.named, approved: true)
+        perform(pending.action, place: pending.place, turn: turns[at].id, goOn: !pending.named, approved: true, did: pending.did,
+                finishing: pending.last)
     }
 
     /// The step held for the go-ahead, not done: the request ends there.
@@ -284,10 +296,13 @@ final class Assistant: ObservableObject, Identifiable {
         turns[at].steps.append("Didn't: \(pending.what)")
     }
 
-    /// The step done on the page; then, for the model's steps, the page read
-    /// again and the model asked for the next one — up to AIAct.mostSteps.
-    /// GO is all that was asked, and a place the person named is too.
-    private func perform(_ action: AIAct.Action, place: AIPage.Place?, turn id: UUID, goOn: Bool, approved: Bool) {
+    /// The step done on the page; then the next in its row, or, for the
+    /// model's steps, the page read again and the model asked for the next
+    /// ones — up to AIAct.mostSteps. GO is all that was asked, and a place
+    /// the person named is too.
+    private func perform(_ action: AIAct.Action, place: AIPage.Place?, turn id: UUID, goOn: Bool, approved: Bool,
+                         then rest: [AIAct.Action] = [], did before: [String] = [], finishing: Bool = false,
+                         written: AIPage.Read? = nil) {
         let generation = self.generation
         Task { @MainActor [weak self, weak page] in
             guard let page else {
@@ -295,15 +310,24 @@ final class Assistant: ObservableObject, Identifiable {
                 if let self, let at = self.turns.firstIndex(where: { $0.id == id }) { self.turns[at].acting = false }
                 return
             }
+            // Stopped before this step got under way: it isn't taken.
+            guard self?.generation == generation else { return }
             // Every step is watched as it goes: the page may go to the sites
             // this request is on, and to where this step was meant to go —
             // a link or address that passed AIAct.caution, or what the
             // person allowed. Anywhere else is stopped and waits.
             let meant = [action.url, place?.href] + (approved ? [place?.target] : [])
             let allowed = (self?.sites ?? []) + meant.compactMap { $0 }
+            let address = page.pageAddress
             AIAct.watch(page, sites: allowed)
-            let failed = await AIAct.perform(action, place: place, in: page, checked: approved)
-            if failed == nil, action.verb != .go || place?.kind != .section { await AIAct.settle(page) }
+            let failed = await AIAct.perform(action, place: place, in: page, checked: approved, same: !before.isEmpty)
+            // More of the row to come after a step that only fills in or
+            // ticks: a moment for the page, unless it starts to load.
+            let filling = [.type, .pick, .scroll].contains(action.verb) || (action.verb == .click && place?.kind == .field)
+            var loaded = false
+            if failed == nil, action.verb != .go || place?.kind != .section {
+                loaded = await AIAct.settle(page, briefly: filling && !rest.isEmpty)
+            }
             let held = AIAct.unwatch(page)
             guard let self, self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
             if let here = page.pageAddress, held == nil, !self.onCourse, allowed.contains(where: { AIPage.sameSite(here, $0) }) {
@@ -315,7 +339,7 @@ final class Assistant: ObservableObject, Identifiable {
                 let host = held.host().map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } ?? "another site"
                 self.turns[at].waiting = AIAct.Pending(action: AIAct.Action(verb: .visit, url: held), place: nil,
                                                        what: "Open \(host)", why: "The page tried to take it to another site.",
-                                                       named: !goOn)
+                                                       named: !goOn, did: before + ["Done: \(did)."])
                 return
             }
             guard goOn, action.verb != .go, let request = self.turns[at].question else {
@@ -332,8 +356,28 @@ final class Assistant: ObservableObject, Identifiable {
                 self.turns[at].acting = false
                 return
             }
+            let row = before + [failed.map { "\(did) didn't work: \($0)." } ?? "Done: \(did)."]
+            // The whole row done, and the model said that's all: not asked again.
+            if failed == nil, rest.isEmpty, finishing {
+                self.turns[at].acting = false
+                return
+            }
             let fresh = await AIPage.read(page)
             guard self.generation == generation, let at = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            // The rest of the row, while the page is still the one it was
+            // written for: no page load, the same address, the same title
+            // and headings, and the next step's place read again just as the
+            // model was shown it.
+            if failed == nil, let next = rest.first, !loaded, page.pageAddress == address, let fresh,
+               let written, AIAct.unchanged(next, was: written, now: fresh) {
+                self.read = fresh
+                self.addressed = self.addressed || fresh.addressed
+                self.act(next, then: Array(rest.dropFirst()), turn: id, named: false, did: row, finishing: finishing, written: written)
+                return
+            }
+            let cut = rest.isEmpty ? "" : failed == nil ? " The page changed, so the rest of your steps weren't done."
+                : " So the rest of your steps weren't done."
+            let outcome = row.joined(separator: " ") + cut
             guard let fresh else {
                 self.turns[at].steps.append("The page has nothing on it to read")
                 self.turns[at].acting = false
@@ -341,8 +385,7 @@ final class Assistant: ObservableObject, Identifiable {
             }
             self.read = fresh
             self.addressed = self.addressed || fresh.addressed
-            let outcome = failed.map { "\(did) didn't work: \($0)." } ?? "Done: \(did)."
-            self.withPage(AIPage.step(fresh, did: did, failed: failed, request: request, fence: self.fence),
+            self.withPage(AIPage.step(fresh, outcome: outcome, request: request, fence: self.fence),
                           short: outcome + " (That page is left out here.)")
             self.turns[at].answer = ""
             self.turns[at].done = false

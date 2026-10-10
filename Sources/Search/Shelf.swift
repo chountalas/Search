@@ -97,18 +97,51 @@ extension Browser {
     }
 }
 
-/// The shelf as it sits in the column.
+/// The shelf as it sits in the column. It watches the tab on screen rather
+/// than the whole browser, so it isn't drawn again for every key typed in
+/// the address field, yet still lights the right row when a page moves to
+/// another address of its own accord.
 struct ShelfView: View {
-    @ObservedObject var browser: Browser
+    let browser: Browser
+    let space: Space
+    let tab: Tab?
+    let bookmarks: Bookmarks
+
+    var body: some View {
+        if let tab {
+            ShelfOnScreen(browser: browser, space: space, tab: tab, bookmarks: bookmarks)
+        } else {
+            ShelfLines(browser: browser, space: space, here: nil, bookmarks: bookmarks)
+        }
+    }
+}
+
+private struct ShelfOnScreen: View {
+    let browser: Browser
+    let space: Space
+    @ObservedObject var tab: Tab
+    let bookmarks: Bookmarks
+
+    var body: some View {
+        ShelfLines(browser: browser, space: space, here: tab.pageAddress, bookmarks: bookmarks)
+    }
+}
+
+private struct ShelfLines: View {
+    let browser: Browser
+    let space: Space
+    /// The address of the page on screen.
+    let here: URL?
     @ObservedObject var bookmarks: Bookmarks
     @ObservedObject private var shelf = Shelf.shared
 
     var body: some View {
-        let lines = shelf.lines(Shelf.folder(for: browser.space, in: bookmarks.roots))
+        let lines = shelf.lines(Shelf.folder(for: space, in: bookmarks.roots))
         if !lines.isEmpty {
             VStack(spacing: SideBar.gap) {
                 ForEach(lines) { line in
-                    ShelfRow(browser: browser, line: line, open: shelf.open.contains(line.id)) {
+                    ShelfRow(browser: browser, line: line, open: shelf.open.contains(line.id),
+                             live: !line.node.isFolder && Shelf.same(here, line.node.url.flatMap(URL.init(string:)))) {
                         if line.node.isFolder {
                             withAnimation(Motion.quick) { shelf.toggle(line.id) }
                         } else if let url = line.node.url.flatMap(URL.init(string:)) {
@@ -128,16 +161,16 @@ struct ShelfView: View {
 }
 
 private struct ShelfRow: View {
-    @ObservedObject var browser: Browser
+    let browser: Browser
     let line: Shelf.Line
     let open: Bool
+    /// The bookmark the tab on screen shows.
+    let live: Bool
     let act: () -> Void
 
     @State private var hovering = false
 
     private var url: URL? { line.node.url.flatMap(URL.init(string:)) }
-    /// The bookmark the tab on screen shows.
-    private var live: Bool { !line.node.isFolder && Shelf.same(browser.active?.pageAddress, url) }
 
     var body: some View {
         HStack(spacing: 8) {

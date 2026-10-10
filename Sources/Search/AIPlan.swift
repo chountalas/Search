@@ -341,7 +341,8 @@ enum AIPlan {
 
         var said = false
         var failure: String?
-        for await line in child.lines {
+        var over = false
+        reading: for await line in child.lines {
             switch heard(line, provider) {
             case .piece(let piece):
                 // Codex's messages come whole; a second one is a paragraph of its own.
@@ -349,6 +350,7 @@ enum AIPlan {
                 said = true
             case .whole(let text):
                 if !said, !text.isEmpty { yield(text); said = true }
+                over = true
             case .failed(let why):
                 failure = why
             case .tool(let kind):
@@ -356,9 +358,27 @@ enum AIPlan {
                 // version, another model — it is stopped there.
                 failure = "it went to use a tool (\(kind)), so Search stopped it."
                 run.stop()
+            case .over:
+                over = true
             case .nothing:
                 break
             }
+            // The answer is whole: not a moment more spent on the program
+            // going (Codex takes a second or so).
+            if over, failure == nil { break reading }
+        }
+        if over, failure == nil {
+            // Let go, and reaped once it has gone; stopped if it lingers.
+            // Held weakly: a timer called off still waits out its time, and
+            // with it the program's pipes would.
+            let lingering = DispatchWorkItem { [weak child] in child?.stop() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: lingering)
+            Task.detached {
+                _ = await exited.value
+                lingering.cancel()
+            }
+            if !said { throw AIError.unreachable("\(name) didn't answer.") }
+            return
         }
         let status = await exited.value
         if Task.isCancelled { return }
@@ -421,6 +441,8 @@ enum AIPlan {
         let off = ["shell_tool", "unified_exec", "view_image", "apps", "browser_use", "browser_use_external", "computer_use",
                    "image_generation", "sleep_tool", "tool_suggest", "goals", "code_mode_host", "hooks", "multi_agent",
                    "memories", "daemon_auto_start",
+                   // No plugin or skill looked up online first: half a second an answer.
+                   "plugins", "remote_plugin", "plugin_sharing", "skill_search", "skill_mcp_dependency_install",
                    // Its snapshot of your shell runs your shell's startup files.
                    "shell_snapshot", "shell_snapshot_v2"]
         for feature in off { arguments += ["--disable", feature] }
@@ -481,6 +503,8 @@ enum AIPlan {
         case failed(String)
         /// A tool it was never given, about to be used.
         case tool(String)
+        /// The answer is over.
+        case over
         case nothing
     }
 
@@ -520,6 +544,8 @@ enum AIPlan {
                   let text = item["text"] as? String, !text.isEmpty
             else { return .nothing }
             return .piece(text)
+        case "turn.completed":
+            return .over
         case "turn.failed", "error":
             let said = ((json["error"] as? [String: Any])?["message"] as? String) ?? (json["message"] as? String) ?? ""
             // Often the provider's own error, as JSON in a string.
@@ -569,7 +595,7 @@ enum AIPlan {
         else { return nil }
         child.give(Data())
         let exited = Task { await child.exited() }
-        let timer = DispatchWorkItem { child.stop() }
+        let timer = DispatchWorkItem { [weak child] in child?.stop() }
         DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timer)
         defer { timer.cancel() }
         var said = ""

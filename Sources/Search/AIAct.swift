@@ -6,11 +6,14 @@ import WebKit
 //
 // The model sees what it can act on as a numbered list inside the page's
 // text (AIPage.read: headings, links, buttons, fields — never a password or
-// card field, never what is typed in one) and ends an answer with one
-// action line. Search does it, waits for the page to settle, reads it again
-// and asks for the next step, until the model writes no action, the person
-// presses Stop, or fifteen steps have gone by. Each step is outlined on the
-// page as it happens and listed under the answer.
+// card field, never what is typed in one) and ends an answer with action
+// lines — up to five in a row, so "type it, then press Return" is one
+// answer, not two. Search does them in order, each checked as it comes, and
+// stops the row early if the page goes to another page or anything in it
+// changed since it was read. Then it reads the page again and asks for the
+// next steps, until the model writes no action, the person presses Stop, or
+// fifteen steps have gone by. Each step is outlined on the page as it
+// happens and listed under the answer.
 //
 // The page's text can steer a model, so what can't be taken back waits for
 // the person: anything that leaves for another site they didn't name, any
@@ -46,12 +49,65 @@ enum AIAct {
         let why: String
         /// The person named the place: nothing follows it.
         var named = false
+        /// What the row it came in did before it, for the model.
+        var did: [String] = []
+        /// The last of a row written with DONE: once it's done, so is the request.
+        var last = false
     }
 
     /// The most a single request does before it stops and says so.
     static let mostSteps = 15
 
+    /// The most action lines one answer may end with, done in a row
+    /// without asking the model in between.
+    static let mostInARow = 5
+
     // MARK: - the action line
+
+    /// The last line of a row whose end the model needn't see: what was
+    /// asked is done once the row is, so it isn't asked again.
+    static let finished = "DONE"
+
+    /// The actions an answer ends with, and whether the request ends with them.
+    struct Row: Equatable {
+        var actions: [Action] = []
+        var done = false
+    }
+
+    /// The actions the model ended its answer with, in order: the action
+    /// lines at its end, up to the first that isn't written as asked, and
+    /// DONE after them if it wrote that.
+    nonisolated static func parseAll(_ answer: String, count: Int) -> Row {
+        var lines = answer.split(whereSeparator: \.isNewline).map(String.init).filter { !clean($0).isEmpty }
+        var row = Row()
+        if let last = lines.last, clean(last) == finished {
+            row.done = true
+            lines.removeLast()
+        }
+        var start = lines.count
+        while start > 0, isAction(lines[start - 1]) { start -= 1 }
+        for line in lines[start...] {
+            guard let action = parse(line, count: count) else { break }
+            row.actions.append(action)
+        }
+        // DONE holds only for a row that is done whole: none of it left out
+        // as unreadable or past the most.
+        if row.actions.count != lines.count - start || row.actions.count > mostInARow { row.done = false }
+        row.actions = Array(row.actions.prefix(mostInARow))
+        return row
+    }
+
+    /// Whether the next action of a row still has the page it was written
+    /// for: the same title and headings — not another product or step shown
+    /// in place — and, read again, the same thing at its number, with the
+    /// same words, link, sort and form. Otherwise the row stops there.
+    nonisolated static func unchanged(_ action: Action, was: AIPage.Read, now: AIPage.Read) -> Bool {
+        guard was.title == now.title,
+              was.places.filter({ $0.kind == .section }) == now.places.filter({ $0.kind == .section })
+        else { return false }
+        guard let index = action.index else { return true }
+        return was.places.indices.contains(index) && now.places.indices.contains(index) && was.places[index] == now.places[index]
+    }
 
     /// The action the model ended its answer with: the last line that isn't
     /// empty, and only when it is an action written as asked. Nil otherwise.
@@ -100,7 +156,8 @@ enum AIAct {
         let word = String(line.prefix(while: { $0.isLetter }))
         guard !word.isEmpty, word == word.uppercased(), word.allSatisfy({ $0.isASCII }) else { return false }
         if Verb(rawValue: word) != nil { return true }
-        return line == word && Verb.allCases.contains { $0.rawValue.hasPrefix(word) }
+        if line == finished { return true }
+        return line == word && (Verb.allCases.contains { $0.rawValue.hasPrefix(word) } || finished.hasPrefix(word))
     }
 
     /// A line without the bold, code marks and spaces a model wraps it in.
@@ -245,8 +302,11 @@ enum AIAct {
     // MARK: - doing it
 
     /// The action, done on the page. Nil when it went; why not otherwise.
+    /// `checked`: allowed by the person. `same`: not the first of a row, so
+    /// the page may have changed since it was read. Either way, it is done
+    /// only on the link, or the words, as they were read.
     @MainActor
-    static func perform(_ action: Action, place: AIPage.Place?, in tab: Tab, checked: Bool = false) async -> String? {
+    static func perform(_ action: Action, place: AIPage.Place?, in tab: Tab, checked: Bool = false, same: Bool = false) async -> String? {
         switch action.verb {
         case .visit:
             guard let url = action.url else { return "no address" }
@@ -269,29 +329,34 @@ enum AIAct {
         guard let web = tab.built else { return "the page isn't open" }
         let result = try? await web.callAsyncJavaScript(script, arguments: [
             "n": action.index ?? -1, "verb": action.verb.rawValue, "text": action.text,
-            // Allowed by the person: still the link, or still the words, they
-            // were shown — a page can change an element after it was read.
-            "href": checked ? place?.href?.absoluteString ?? "" : "",
-            "words": checked && place?.kind == .button ? Self.bare(place?.text ?? "") : "",
+            // Still the link, or still the words, the person or the model was
+            // shown — a page can change an element after it was read.
+            "href": checked || same ? place?.href?.absoluteString ?? "" : "",
+            "words": (checked || same) && place?.kind == .button ? Self.bare(place?.text ?? "") : "",
         ], in: nil, contentWorld: Web.world)
         let said = result as? String ?? "the page didn't answer"
+        if said == "changed" { return checked ? "it changed after you allowed it" : "it changed on the page" }
         return said == "ok" ? nil : said
     }
 
     /// Until the page is still again: a load it started to its end, or a
-    /// moment for a page that redraws itself in place.
+    /// moment for a page that redraws itself in place. `briefly`: between
+    /// two of a row, after a step that only fills in or ticks. True when a
+    /// page load started.
     @MainActor
-    static func settle(_ tab: Tab) async {
+    @discardableResult
+    static func settle(_ tab: Tab, briefly: Bool = false) async -> Bool {
         let start = Date()
         var loaded = false
-        while Date().timeIntervalSince(start) < 0.6 {
+        while Date().timeIntervalSince(start) < (briefly ? 0.25 : 0.6) {
             if tab.loading { loaded = true; break }
             try? await Task.sleep(for: .milliseconds(50))
         }
         if loaded {
             while tab.loading, Date().timeIntervalSince(start) < 15 { try? await Task.sleep(for: .milliseconds(100)) }
         }
-        try? await Task.sleep(for: .milliseconds(loaded ? 500 : 400))
+        try? await Task.sleep(for: .milliseconds(loaded ? 500 : briefly ? 100 : 400))
+        return loaded
     }
 
     /// A button's words without the state AIPage.read added to them.
@@ -309,11 +374,12 @@ enum AIAct {
       window.scrollBy({ top: (text === 'up' ? -1 : 1) * window.innerHeight * 0.85, behavior: 'smooth' });
       return 'ok';
     }
-    if (!el || !el.isConnected) return "it isn't on the page any more";
-    if (href && el.href !== href) return 'it changed after you allowed it';
+    // On the page that was read, not moved into a frame of it since.
+    if (!el || !el.isConnected || el.ownerDocument !== document) return "it isn't on the page any more";
+    if (href && el.href !== href) return 'changed';
     if (words) {
       var now = [el.innerText, el.value, el.getAttribute('aria-label'), el.title, el.alt].join(' ').replace(/\\s+/g, ' ');
-      if (now.indexOf(words) < 0) return 'it changed after you allowed it';
+      if (now.indexOf(words) < 0) return 'changed';
     }
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     try {
