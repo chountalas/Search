@@ -24,6 +24,9 @@ enum AI {
 enum AIProvider: String, CaseIterable, Identifiable {
     /// The model downloaded to this Mac, run by Search's own engine (AIEngine).
     case thisMac
+    /// Connor's fork: a plan you already pay for, through the program that's
+    /// signed in with it on this Mac — Claude Code, Codex (see AIPlan).
+    case claudePlan, chatGPTPlan
     case anthropic, openAI, gemini, openRouter
     /// Ollama, on this Mac.
     case ollama
@@ -35,6 +38,8 @@ enum AIProvider: String, CaseIterable, Identifiable {
     var name: String {
         switch self {
         case .thisMac: return "On this Mac"
+        case .claudePlan: return "Claude (your plan)"
+        case .chatGPTPlan: return "ChatGPT (your plan)"
         case .anthropic: return "Anthropic"
         case .openAI: return "OpenAI"
         case .gemini: return "Google Gemini"
@@ -47,6 +52,9 @@ enum AIProvider: String, CaseIterable, Identifiable {
     /// Runs on this Mac: nothing leaves it, and no key is needed.
     var isLocal: Bool { self == .thisMac || self == .ollama || self == .lmStudio }
 
+    /// Answered through a plan, by a program on this Mac: no key.
+    var isPlan: Bool { self == .claudePlan || self == .chatGPTPlan }
+
     /// The one address requests go to. A key is kept for this host and is
     /// never sent to any other (see AIClient.request).
     var base: URL {
@@ -54,6 +62,9 @@ enum AIProvider: String, CaseIterable, Identifiable {
         switch self {
         // Never asked over the network: the engine is a program of its own.
         case .thisMac: return URL(string: "http://127.0.0.1:1/")!
+        // Never asked by Search: where the program sends it.
+        case .claudePlan: return URL(string: "https://api.anthropic.com/")!
+        case .chatGPTPlan: return URL(string: "https://chatgpt.com/")!
         case .anthropic: return URL(string: "https://api.anthropic.com/v1/")!
         case .openAI: return URL(string: "https://api.openai.com/v1/")!
         case .gemini: return URL(string: "https://generativelanguage.googleapis.com/v1beta/")!
@@ -75,6 +86,8 @@ enum AIProvider: String, CaseIterable, Identifiable {
     var defaultModel: String {
         switch self {
         case .thisMac: return AIEngine.model.name
+        case .claudePlan: return "sonnet"
+        case .chatGPTPlan: return "gpt-6.1-sol"
         case .anthropic: return "claude-haiku-4-5"
         case .openAI: return "gpt-5.4-mini"
         case .gemini: return "gemini-3.8-flash"
@@ -139,7 +152,7 @@ enum AIKeys {
 
     static func save(_ key: String, for provider: AIProvider) -> Saved {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, !provider.isLocal else { return .failed }
+        guard !key.isEmpty, !provider.isLocal, !provider.isPlan else { return .failed }
         if Store.testing {
             rehearsal[account(provider)] = key
             return .kept

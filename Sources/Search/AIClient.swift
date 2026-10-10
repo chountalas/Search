@@ -86,7 +86,9 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// model is for and how to treat the page (see AIPage.system).
     func stream(_ provider: AIProvider, model: String, system: String, messages: [AIMessage],
                 key: String?) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
+        // A plan's answer comes from a program on this Mac, not a request.
+        if provider.isPlan { return AIPlan.stream(provider, model: model, system: system, messages: messages) }
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let request = try Self.request(provider, model: model, system: system, messages: messages, key: key)

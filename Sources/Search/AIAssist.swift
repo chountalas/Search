@@ -175,7 +175,7 @@ final class Assistant: ObservableObject, Identifiable {
     /// The model asked, its answer streamed into the last turn.
     private func run() {
         // The key, read now and let go with the request.
-        let key = provider.isLocal ? nil : AIKeys.key(for: provider)
+        let key = provider.isLocal || provider.isPlan ? nil : AIKeys.key(for: provider)
         let stream = provider == .thisMac
             ? AIEngine.shared.stream(system: AIPage.system(fence: fence), messages: messages)
             : AIClient.shared.stream(provider, model: model, system: AIPage.system(fence: fence), messages: messages, key: key)
@@ -357,6 +357,12 @@ enum AIAssist {
     /// What a provider off this Mac is sent, said once, the first time it is
     /// used — and a word on what it does with it where that matters.
     static func notice(for provider: AIProvider) -> String {
+        if provider.isPlan {
+            let company = provider == .claudePlan ? "Anthropic" : "OpenAI"
+            let account = provider == .claudePlan ? "your Claude plan" : "your ChatGPT plan"
+            return "When you ask, Search sends this page's text, its address and your question to \(company), through \(AIPlan.programName(provider)) on this Mac, signed in with \(account). Their terms and privacy policy apply. Nothing is sent until you ask, never from a private tab, and neither Search nor \(AIPlan.programName(provider)) keeps a copy."
+                + "\n\nIt runs with no tools and none of your own setup for it, so it can't read or change anything on this Mac. Each answer counts toward your plan's limits."
+        }
         var text = "When you ask, Search sends this page's text, its address and your question to \(provider.host)"
         text += provider == .openRouter ? ", which passes them to the model's provider." : "."
         text += " Their terms and privacy policy apply. Nothing is sent until you ask, never from a private tab, and Search keeps no copy."
@@ -408,7 +414,13 @@ extension Browser {
             announce("Choose a model for \(provider.name)")
             return
         }
-        guard provider.isLocal || AIKeys.hint(for: provider) != nil else {
+        if provider.isPlan, AIPlan.program(for: provider) == nil {
+            settingsPage = .ai
+            tuning = true
+            announce("\(AIPlan.programName(provider)) isn't on this Mac")
+            return
+        }
+        guard provider.isLocal || provider.isPlan || AIKeys.hint(for: provider) != nil else {
             settingsPage = .ai
             tuning = true
             announce("No key for \(provider.name) yet")
@@ -642,6 +654,8 @@ struct AISettings: View {
     @State private var hint: String?
     @State private var models: [String] = []
     @State private var looking = false
+    /// A plan's program, and how it's signed in: asked when the page shows.
+    @State private var account: AIPlan.Account?
     @ObservedObject private var engine = AIEngine.shared
 
     var body: some View {
@@ -671,7 +685,8 @@ struct AISettings: View {
                     }
                     if let provider = prefs.aiProvider {
                         Rule()
-                        if provider == .thisMac { onThisMac } else if provider.isLocal { localModel(provider) } else { key(provider); Rule(); cloudModel(provider) }
+                        if provider == .thisMac { onThisMac } else if provider.isLocal { localModel(provider) }
+                        else if provider.isPlan { plan(provider); Rule(); cloudModel(provider) } else { key(provider); Rule(); cloudModel(provider) }
                     }
                 }
                 .onChange(of: prefs.aiProvider) { _, _ in
@@ -725,6 +740,7 @@ struct AISettings: View {
 
     private var place: String {
         guard let provider = prefs.aiProvider else { return "A provider you have a key with, or an app on this Mac" }
+        if provider.isPlan { return "Your plan, through \(AIPlan.programName(provider)) on this Mac. No key. Never from a private tab" }
         return provider.isLocal
             ? "Nothing leaves this Mac. Also in private tabs"
             : "Your key, kept in this Mac's keychain, sent only to \(provider.host). Never from a private tab"
@@ -761,6 +777,31 @@ struct AISettings: View {
                     }
                 }
             }
+        }
+    }
+
+    /// The program a plan goes through, and whether it's signed in with one.
+    private func plan(_ provider: AIProvider) -> some View {
+        let program = AIPlan.programName(provider)
+        let said: String
+        switch account {
+        case .missing:
+            said = provider == .claudePlan ? "Claude Code isn't on this Mac. Install it, then sign in with your Claude account"
+                : "Codex isn't on this Mac. Install it, then sign in with ChatGPT"
+        case .signedOut:
+            said = provider == .claudePlan ? "Claude Code isn't signed in. In Terminal, run claude and sign in with your Claude account"
+                : "Codex isn't signed in. In Terminal, run codex login and sign in with ChatGPT"
+        case .plan(let name):
+            said = "\(program), signed in with \(name). It runs with no tools and none of your setup for it"
+        case .apiKey:
+            said = "\(program) is signed in with an API key, so answers are billed by use, not your plan"
+        case .unknown:
+            said = looking ? "Asking \(program)…" : "\(program) didn't say whether it's signed in"
+        case nil:
+            said = "Asking \(program)…"
+        }
+        return Line("Account", said) {
+            Pill("Look Again") { refresh() }
         }
     }
 
@@ -835,8 +876,19 @@ struct AISettings: View {
     /// now, never in the background.
     private func refresh() {
         guard let provider = prefs.aiProvider else { return }
-        hint = provider.isLocal ? nil : AIKeys.hint(for: provider)
+        hint = provider.isLocal || provider.isPlan ? nil : AIKeys.hint(for: provider)
         models = []
+        account = nil
+        if provider.isPlan {
+            looking = true
+            Task { @MainActor in
+                let found = await AIPlan.account(provider)
+                guard prefs.aiProvider == provider else { return }
+                account = found
+                looking = false
+            }
+            return
+        }
         guard provider.isLocal else { return }
         looking = true
         Task { @MainActor in

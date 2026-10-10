@@ -1406,6 +1406,24 @@ final class Bench {
                         answer(["error": error.localizedDescription, "text": text])
                     }
                 }
+            case "cli":
+                // A plan's program stood in for by a script (Connor's fork,
+                // AIPlan), and a key set in Search's own environment that
+                // must never reach it; "account" is what Settings would say.
+                guard let provider = (request["provider"] as? String).flatMap(AIProvider.init(rawValue:)), provider.isPlan else {
+                    answer(["error": "ai cli PROVIDER [PATH]"]); return
+                }
+                if let path = request["path"] as? String {
+                    AIPlan.testProgram[provider] = path.isEmpty ? nil : URL(fileURLWithPath: path)
+                }
+                if let leak = request["leak"] as? String {
+                    setenv("ANTHROPIC_API_KEY", leak, 1)
+                    setenv("OPENAI_API_KEY", leak, 1)
+                }
+                Task { @MainActor in
+                    let account = await AIPlan.account(provider)
+                    answer(["program": AIPlan.program(for: provider)?.path ?? "", "account": "\(account)"])
+                }
             case "signin":
                 // OpenRouter's sign-in, against the stand-in: the tab it opens,
                 // and a moment later whether a key is kept.
@@ -1450,6 +1468,9 @@ final class Bench {
                 answer(["open": browser.assisting != nil])
             case "agree":
                 browser.assisting?.agree()
+                answer(["open": browser.assisting != nil])
+            case "close":
+                browser.closeAssistant()
                 answer(["open": browser.assisting != nil])
             case "allow", "deny", "stop":
                 // The step waiting for a go-ahead, allowed or not; or Stop.

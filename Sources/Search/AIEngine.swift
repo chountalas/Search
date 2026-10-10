@@ -375,8 +375,9 @@ final class AIEngine: ObservableObject {
         }
     }
 
-    /// responsibility_spawnattrs_setdisclaim, where the system has it.
-    nonisolated(unsafe) private static let disclaim: (@convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32)? = {
+    /// responsibility_spawnattrs_setdisclaim, where the system has it. Also
+    /// for the programs a plan runs through (AIPlan).
+    nonisolated(unsafe) static let disclaim: (@convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32)? = {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim") else { return nil }
         return unsafeBitCast(symbol, to: (@convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32).self)
     }()
