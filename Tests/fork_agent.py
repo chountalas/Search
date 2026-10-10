@@ -42,6 +42,10 @@ SHOP = """<!doctype html><title>Trail Shop</title>
 <button type="button" onclick="window.deleted = true">Delete account</button>
 <a href="/logout">Sign out</a>
 <a href="http://localhost:PORT/partner">Partner store</a>
+<form action="http://localhost:PORT/collect" role="search"><input type="search" aria-label="Search partners"></form>
+<form action="/subscribe" method="post" role="search"><input type="search" aria-label="Search newsletters"><button>Find</button></form>
+<div role="dialog" aria-modal="true"><p>Remove the trail runner?</p>
+<button type="button" onclick="window.confirmed = true">OK</button><button type="button" onclick="window.dismissed = true">Close</button></div>
 <script>window.count = 0</script>
 """
 
@@ -81,7 +85,7 @@ asked = []    # every request it got
 
 def number(listing, label):
     """The place's number in the newest list Search sent, by its label."""
-    for n, kind, text in re.findall(r"^(\d+)\. (link|button|field \([^)]*\)|section of this page): (.+?)(?: → \S+)?(?: \(sends a form\))?$", listing, re.M):
+    for n, kind, text in re.findall(r"^(\d+)\. (link|button|field \([^)]*\)|section of this page): (.+?)(?: → \S+)?(?: \(sends a form(?: to another site)?\))?(?: \(in a dialog\))?$", listing, re.M):
         if text == label:
             return n
     return "999"
@@ -170,6 +174,9 @@ try:
     t.ok("read: a box to tick", ("field", "Gift wrap") in places and "not ticked" in places[("field", "Gift wrap")][3])
     t.ok("read: no password or card field", not any(p[1] in ("Password", "Card") for p in read["places"]), [p[1] for p in read["places"]])
     t.ok("read: the submit button says it sends a form", places.get(("button", "Send message"), [""] * 5)[4] == "form")
+    t.ok("read: a search sent to another site is that", places.get(("field", "Search partners"), [""] * 5)[4] == "elsewhere", places.get(("field", "Search partners")))
+    t.ok("read: a search that posts is a post", places.get(("field", "Search newsletters"), [""] * 5)[4] == "post", places.get(("field", "Search newsletters")))
+    t.ok("read: a dialog's button says so", places.get(("button", "OK"), [""] * 5)[3] == "dialog", places.get(("button", "OK")))
 
     # -- a search, in two steps, and the page read again between them
     sent = len(asked)
@@ -219,6 +226,20 @@ try:
     t.ok("send: typing goes, the send waits", turn.get("waiting") == "Click “Send message”" and turn["steps"] == ["Typed “hi” in “Message”"], turn)
     ai("allow"); turn = settled()
     t.ok("send: allowed, it went", sv.ev(tab, "location.pathname") == "/sent" and turn["shown"] == "Sent." and not turn["acting"], turn)
+
+    fresh(tab, "/shop")
+    turn = ask(tab, "search partners for boots",
+               [("Typing it.", "TYPE", "Search partners", "boots"), ("Searching.", "ENTER", "Search partners", None)])
+    t.ok("elsewhere: a search sent to another site waits", "another site" in turn.get("why", "") and "/collect" not in "".join(hits), turn)
+    ai("deny"); time.sleep(0.5)
+    turn = ask(tab, "find newsletters", [("Finding.", "CLICK", "Find", None)])
+    t.ok("post: a harmless word on a posting form still waits", turn.get("why") == "It sends a form." and "/subscribe" not in "".join(hits), turn)
+    ai("deny"); time.sleep(0.5)
+    turn = ask(tab, "remove it", [("Confirming.", "CLICK", "OK", None)])
+    t.ok("dialog: its OK waits", "dialog" in turn.get("why", "") and ev(tab, "window.confirmed === true") is False, turn)
+    ai("deny"); time.sleep(0.5)
+    turn = ask(tab, "close that popup", [("Closing it.", "CLICK", "Close", None), "Closed."])
+    t.ok("dialog: closing it doesn't wait", ev(tab, "window.dismissed === true") is True and turn.get("waiting") == "", turn)
 
     fresh(tab, "/shop")
     turn = ask(tab, "open the partner store", [("Opening it.", "CLICK", "Partner store", None)])

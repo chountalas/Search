@@ -15,8 +15,9 @@ import WebKit
 // The page's text can steer a model, so what can't be taken back waits for
 // the person: anything that leaves for another site they didn't name, any
 // press whose words or address say buy, send, delete, sign out and the
-// like, and anything that sends a form other than a search. On a page with
-// words written for an AI, every action but a scroll waits.
+// like, anything that sends a form other than a search of this same site,
+// and any yes in a dialog. On a page with words written for an AI, every
+// action but a scroll waits.
 
 enum AIAct {
     enum Verb: String, CaseIterable {
@@ -112,6 +113,8 @@ enum AIAct {
     /// Words on a button or link, or in its address, for what can't be taken back.
     private static let weighty = #"(?i)\b(buy|pay|payment|purchase|place (your )?order|order now|checkout|check out|send|post|publish|tweet|reply|comment|submit|confirm|delete|remove|erase|cancel|unsubscribe|sign ?out|log ?out|transfer|donate|subscribe|book|reserve|apply|accept|agree|approve|decline|share|invite|archive|upload|withdraw|deactivate|close (my )?account)\b"#
     private static let weightyAddress = #"(?i)(log-?out|sign-?out|delete|remove|unsubscribe|cancel|checkout|purchase)"#
+    /// A dialog's way out, which answers nothing.
+    private static let dismiss = #"(?i)^(close|dismiss|no,? thanks|not now|maybe later|×|x)$"#
     /// Presses that send a form but change nothing that matters.
     private static let light = #"(?i)^(search|go|find|filter|sort|next|continue|add to (cart|bag|basket)|sign in|log ?in|show( more)?|view( more)?|more|load more|see more)\b"#
 
@@ -140,12 +143,20 @@ enum AIAct {
                 || address.range(of: weightyAddress, options: .regularExpression) != nil {
                 return "It could change something that can't be undone."
             }
+            if place.form == "elsewhere" { return "It sends a form to another site." }
+            if place.form == "post", words.range(of: #"(?i)^add to (cart|bag|basket)\b"#, options: .regularExpression) == nil {
+                return "It sends a form."
+            }
             if place.form == "form", words.range(of: light, options: .regularExpression) == nil {
                 return "It sends a form."
             }
+            if place.detail == "dialog", words.range(of: dismiss, options: .regularExpression) == nil {
+                return "It answers a dialog on the page."
+            }
         case .enter:
             guard let place else { return nil }
-            if place.form == "form" || place.detail.hasPrefix("text box") {
+            if place.form == "elsewhere" { return "It sends what's in “\(place.text)” to another site." }
+            if place.form == "form" || place.form == "post" || place.detail.hasPrefix("text box") {
                 return "It may send what's in “\(place.text)”."
             }
         case .type, .pick:

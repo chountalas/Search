@@ -46,7 +46,8 @@ enum AIPage {
         /// A field's sort ("search", "list: Small | Large", "checkbox, ticked");
         /// never what is typed in it.
         var detail = ""
-        /// The form a button or field sends: "search", "form", or "" for none.
+        /// The form a button or field sends: "search" (of this site), "post",
+    /// "elsewhere" (another site), "form", or "" for none.
         var form = ""
     }
 
@@ -212,7 +213,9 @@ enum AIPage {
             case .link:
                 return "\(index + 1). link: \(label) → \(String(place.href?.absoluteString.prefix(200) ?? ""))"
             case .button:
-                return "\(index + 1). button: \(label)\(place.form == "form" ? " (sends a form)" : "")"
+                let form = place.form == "form" || place.form == "post" ? " (sends a form)"
+                    : place.form == "elsewhere" ? " (sends a form to another site)" : ""
+                return "\(index + 1). button: \(label)\(form)\(place.detail == "dialog" ? " (in a dialog)" : "")"
             case .field:
                 return "\(index + 1). field (\(detail)): \(label)"
             case .section:
@@ -580,9 +583,16 @@ enum AIPage {
         if (!said) said = el.getAttribute('placeholder') || el.title || el.getAttribute('name') || '';
         return said.replace(/\\s+/g, ' ').trim();
       }
+      // "elsewhere" when it sends to another site, "post" when it posts,
+      // "search" for a search of this same site, "form" for anything else.
       function formOf(el) {
         var f = el.form || (el.closest && el.closest('form'));
         if (!f) return '';
+        var to;
+        try { to = new URL(el.getAttribute('formaction') || f.getAttribute('action') || location.href, location.href); }
+        catch (e) { return 'form'; }
+        if (to.host !== location.host) return 'elsewhere';
+        if ((el.getAttribute('formmethod') || f.getAttribute('method') || 'get').toLowerCase() !== 'get') return 'post';
         var about = (f.getAttribute('action') || '') + ' ' + (f.id || '') + ' ' +
           (typeof f.className === 'string' ? f.className : '') + ' ' + (f.getAttribute('aria-label') || '');
         if (f.getAttribute('role') === 'search' || f.querySelector('input[type="search"]') || /search|[?&]q=/i.test(about)) return 'search';
@@ -622,6 +632,10 @@ enum AIPage {
           var submits = tag === 'BUTTON' && (el.getAttribute('type') || 'submit').toLowerCase() === 'submit';
           var ticked = /^(checkbox|switch|radio)$/.test(role) ? (el.getAttribute('aria-checked') === 'true' ? ' (ticked)' : ' (not ticked)') : '';
           item = { kind: 'button', text: words + ticked, form: submits ? formOf(el) : '' };
+        }
+        // A button in a dialog may be the yes to "Remove this?": said so.
+        if (item.kind === 'button' && el.closest('dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) {
+          item.detail = 'dialog';
         }
         if (!item.text || item.text.length > 100 || !inSight(el)) continue;
         if (item.href) hrefs[item.href] = 1;
